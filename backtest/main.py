@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 import pandas as pd
 import yaml
+import json
 
 # Add python-risk to path if not already handled inside modules
 risk_engine_path = Path(__file__).resolve().parent.parent / "python-risk"
@@ -64,6 +65,8 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     cb_cfg_dict = config.get('circuit_breaker', {})
     cb_config = CircuitBreakerConfig(**cb_cfg_dict)
 
+    summary_data = {}
+
     # 2. Run simulation for each strategy
     for strat in strategies:
         strat_name = strat.get('name', 'Unknown Strategy')
@@ -101,11 +104,27 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         if any(str(col).isupper() for col in history_df.columns):
              generate_allocation_area_chart(history_df, output_dir=output_dir)
         
+        
         # 6. Export CSV
         safe_name = strat_name.replace(" ", "_").lower()
         csv_path = f"{output_dir}/{safe_name}_history.csv"
         history_df.to_csv(csv_path)
         print(f"[{strat_name}] History exported to {csv_path}")
+        
+        # 6a. Export Monthly Returns
+        monthly_returns_path = f"{output_dir}/monthly_returns_{safe_name}.csv"
+        # Convert index to datetime if not already
+        history_df.index = pd.to_datetime(history_df.index)
+        monthly_returns = history_df['portfolio_value'].resample('ME').last().pct_change().dropna()
+        monthly_returns.to_csv(monthly_returns_path, header=['monthly_return'])
+        
+        # 6b. Append to summary data
+        summary_data[strat_name] = {
+            'metrics': metrics,
+            'attribution': attribution
+        }
+
+        
         
         # 7. Optional Monte Carlo Projection
         if monte_carlo:
@@ -115,6 +134,13 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
                 print(f"[{strat_name}] Monte Carlo projection complete.")
             except ImportError as e:
                 print(f"[{strat_name}] Monte Carlo projection skipped due to error: {e}")
+                
+    # 8. Export Summary JSON
+    summary_path = f"{output_dir}/summary.json"
+    with open(summary_path, 'w') as f:
+        json.dump(summary_data, f, indent=4)
+    print(f"\nAll summary statistics exported to {summary_path}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hyperliquid Autonomous Treasury System: Backtest CLI")

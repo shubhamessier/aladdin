@@ -133,7 +133,7 @@ class TreasurySimulator:
                 if asset in row:
                     self.market_prices[asset] = float(row[asset])
 
-    def _assess_risk(self, portfolio_value: float) -> Tuple[float, np.ndarray]:
+    def _assess_risk(self, portfolio_value: float) -> tuple[float, np.ndarray]:
         # Need at least 30 days of history up to current date
         history_slice = self.price_history_df.loc[:self.current_date]
         var_95 = 0.0

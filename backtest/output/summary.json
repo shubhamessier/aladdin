@@ -1,0 +1,78 @@
+{
+    "Equal Weight": {
+        "metrics": {
+            "annualized_return": 0.19323168770575788,
+            "annualized_volatility": 0.08766809975239181,
+            "sharpe_ratio": 1.9759945544049695,
+            "sortino_ratio": 2.804465929931026,
+            "max_drawdown": -0.028785793355687553,
+            "historical_var_95_1d": 5661.813096138565,
+            "historical_var_99_1d": 11171.013403427385,
+            "total_return": 0.3156003397603486
+        },
+        "attribution": {
+            "beta_to_benchmark": 0.14834725423843065,
+            "annualized_alpha": 0.07277743364614422,
+            "active_return": -0.5069720665887244,
+            "tracking_error": 0.3178038814450447,
+            "information_ratio": -1.5952356034279307
+        }
+    },
+    "Risk Parity": {
+        "metrics": {
+            "annualized_return": 0.19323168770575788,
+            "annualized_volatility": 0.08766809975239181,
+            "sharpe_ratio": 1.9759945544049695,
+            "sortino_ratio": 2.804465929931026,
+            "max_drawdown": -0.028785793355687553,
+            "historical_var_95_1d": 5661.813096138565,
+            "historical_var_99_1d": 11171.013403427385,
+            "total_return": 0.3156003397603486
+        },
+        "attribution": {
+            "beta_to_benchmark": 0.14834725423843065,
+            "annualized_alpha": 0.07277743364614422,
+            "active_return": -0.5069720665887244,
+            "tracking_error": 0.3178038814450447,
+            "information_ratio": -1.5952356034279307
+        }
+    },
+    "Regime-Adaptive": {
+        "metrics": {
+            "annualized_return": 0.19323168770575788,
+            "annualized_volatility": 0.08766809975239181,
+            "sharpe_ratio": 1.9759945544049695,
+            "sortino_ratio": 2.804465929931026,
+            "max_drawdown": -0.028785793355687553,
+            "historical_var_95_1d": 5661.813096138565,
+            "historical_var_99_1d": 11171.013403427385,
+            "total_return": 0.3156003397603486
+        },
+        "attribution": {
+            "beta_to_benchmark": 0.14834725423843065,
+            "annualized_alpha": 0.07277743364614422,
+            "active_return": -0.5069720665887244,
+            "tracking_error": 0.3178038814450447,
+            "information_ratio": -1.5952356034279307
+        }
+    },
+    "Static Conservative": {
+        "metrics": {
+            "annualized_return": 0.19323168770575788,
+            "annualized_volatility": 0.08766809975239181,
+            "sharpe_ratio": 1.9759945544049695,
+            "sortino_ratio": 2.804465929931026,
+            "max_drawdown": -0.028785793355687553,
+            "historical_var_95_1d": 5661.813096138565,
+            "historical_var_99_1d": 11171.013403427385,
+            "total_return": 0.3156003397603486
+        },
+        "attribution": {
+            "beta_to_benchmark": 0.14834725423843065,
+            "annualized_alpha": 0.07277743364614422,
+            "active_return": -0.5069720665887244,
+            "tracking_error": 0.3178038814450447,
+            "information_ratio": -1.5952356034279307
+        }
+    }
+}
