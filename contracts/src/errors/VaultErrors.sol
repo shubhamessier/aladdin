@@ -26,6 +26,7 @@ error Vault__ExternalCallFailed(address target, bytes4 selector, bytes reason);
 error Vault__GrossNotionalExceeded(uint256 postNotional, uint256 maxNotional);
 error Vault__NetDeltaExceeded(int256 postDelta, int256 maxAbsDelta);
 error Vault__StrategyConcentration(address strategy, uint256 postBps, uint256 maxBps);
+error Vault__CBDecayTooSoon();
 
 // Strategy Specific Errors
 error Strategy__NotActive();

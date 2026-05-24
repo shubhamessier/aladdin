@@ -1,25 +1,23 @@
-simulation:
-  start_date: "2023-01-01"
-  end_date: "2024-01-01"
-  initial_cash: 1000000.0
-  assets:
-    - "BTC"
-    - "ETH"
-    - "USDC"
-  data_source: "binance"
-  risk_free_rate: 0.02
-
-strategies:
-  - name: "Equal Weight"
-  - name: "Risk Parity"
-  - name: "Regime-Adaptive"
-  - name: "Static Conservative"
-    stablecoin_allocation_pct: 0.80
-    volatile_allocation_pct: 0.20
-
 circuit_breaker:
+  l1_drop_threshold: 0.1
+  l2_drop_threshold: 0.2
+  l3_drop_threshold: 0.3
+  max_drawdown_threshold: 0.2
   window_seconds: 3600
-  l1_drop_threshold: 0.10
-  l2_drop_threshold: 0.20
-  l3_drop_threshold: 0.30
-  max_drawdown_threshold: 0.20
+simulation:
+  assets:
+  - BTC
+  - ETH
+  - USDC
+  data_source: binance
+  end_date: '2026-05-24'
+  initial_cash: 1000000.0
+  risk_free_rate: 0.02
+  start_date: '2022-05-24'
+strategies:
+- name: Equal Weight
+- name: Risk Parity
+- name: Regime-Adaptive
+- name: Static Conservative
+  stablecoin_allocation_pct: 0.8
+  volatile_allocation_pct: 0.2

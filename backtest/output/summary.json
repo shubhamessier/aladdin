@@ -1,78 +1,78 @@
 {
     "Equal Weight": {
         "metrics": {
-            "annualized_return": 0.19323168770575788,
-            "annualized_volatility": 0.08766809975239181,
-            "sharpe_ratio": 1.9759945544049695,
-            "sortino_ratio": 2.804465929931026,
-            "max_drawdown": -0.028785793355687553,
-            "historical_var_95_1d": 5661.813096138565,
-            "historical_var_99_1d": 11171.013403427385,
-            "total_return": 0.3156003397603486
+            "annualized_return": 0.07784918213255708,
+            "annualized_volatility": 0.25101575784260294,
+            "sharpe_ratio": 0.2304603608544403,
+            "sortino_ratio": 0.2390908275945907,
+            "max_drawdown": -0.32561235177355685,
+            "historical_var_95_1d": 30110.464443954712,
+            "historical_var_99_1d": 51764.097510976644,
+            "total_return": 0.3084812645314623
         },
         "attribution": {
-            "beta_to_benchmark": 0.14834725423843065,
-            "annualized_alpha": 0.07277743364614422,
-            "active_return": -0.5069720665887244,
-            "tracking_error": 0.3178038814450447,
-            "information_ratio": -1.5952356034279307
+            "beta_to_benchmark": 0.5619031751615698,
+            "annualized_alpha": -0.06787386789861949,
+            "active_return": -0.16589586076567198,
+            "tracking_error": 0.20423465867251694,
+            "information_ratio": -0.812280647388454
         }
     },
     "Risk Parity": {
         "metrics": {
-            "annualized_return": 0.19323168770575788,
-            "annualized_volatility": 0.08766809975239181,
-            "sharpe_ratio": 1.9759945544049695,
-            "sortino_ratio": 2.804465929931026,
-            "max_drawdown": -0.028785793355687553,
-            "historical_var_95_1d": 5661.813096138565,
-            "historical_var_99_1d": 11171.013403427385,
-            "total_return": 0.3156003397603486
+            "annualized_return": 0.07847493050160685,
+            "annualized_volatility": 0.25100793712431735,
+            "sharpe_ratio": 0.23296048392543786,
+            "sortino_ratio": 0.24154484345130448,
+            "max_drawdown": -0.32561235177355685,
+            "historical_var_95_1d": 30209.66559513467,
+            "historical_var_99_1d": 51952.66651009193,
+            "total_return": 0.31324786946186745
         },
         "attribution": {
-            "beta_to_benchmark": 0.14834725423843065,
-            "annualized_alpha": 0.07277743364614422,
-            "active_return": -0.5069720665887244,
-            "tracking_error": 0.3178038814450447,
-            "information_ratio": -1.5952356034279307
+            "beta_to_benchmark": 0.5618735790869038,
+            "annualized_alpha": -0.06724149755457395,
+            "active_return": -0.1652701123966222,
+            "tracking_error": 0.2042499738681451,
+            "information_ratio": -0.8091561005697527
         }
     },
     "Regime-Adaptive": {
         "metrics": {
-            "annualized_return": 0.19323168770575788,
-            "annualized_volatility": 0.08766809975239181,
-            "sharpe_ratio": 1.9759945544049695,
-            "sortino_ratio": 2.804465929931026,
-            "max_drawdown": -0.028785793355687553,
-            "historical_var_95_1d": 5661.813096138565,
-            "historical_var_99_1d": 11171.013403427385,
-            "total_return": 0.3156003397603486
+            "annualized_return": 0.07847493050160685,
+            "annualized_volatility": 0.25100793712431735,
+            "sharpe_ratio": 0.23296048392543786,
+            "sortino_ratio": 0.24154484345130448,
+            "max_drawdown": -0.32561235177355685,
+            "historical_var_95_1d": 30209.66559513467,
+            "historical_var_99_1d": 51952.66651009193,
+            "total_return": 0.31324786946186745
         },
         "attribution": {
-            "beta_to_benchmark": 0.14834725423843065,
-            "annualized_alpha": 0.07277743364614422,
-            "active_return": -0.5069720665887244,
-            "tracking_error": 0.3178038814450447,
-            "information_ratio": -1.5952356034279307
+            "beta_to_benchmark": 0.5618735790869038,
+            "annualized_alpha": -0.06724149755457395,
+            "active_return": -0.1652701123966222,
+            "tracking_error": 0.2042499738681451,
+            "information_ratio": -0.8091561005697527
         }
     },
     "Static Conservative": {
         "metrics": {
-            "annualized_return": 0.19323168770575788,
-            "annualized_volatility": 0.08766809975239181,
-            "sharpe_ratio": 1.9759945544049695,
-            "sortino_ratio": 2.804465929931026,
-            "max_drawdown": -0.028785793355687553,
-            "historical_var_95_1d": 5661.813096138565,
-            "historical_var_99_1d": 11171.013403427385,
-            "total_return": 0.3156003397603486
+            "annualized_return": 0.07847493050160685,
+            "annualized_volatility": 0.25100793712431735,
+            "sharpe_ratio": 0.23296048392543786,
+            "sortino_ratio": 0.24154484345130448,
+            "max_drawdown": -0.32561235177355685,
+            "historical_var_95_1d": 30209.66559513467,
+            "historical_var_99_1d": 51952.66651009193,
+            "total_return": 0.31324786946186745
         },
         "attribution": {
-            "beta_to_benchmark": 0.14834725423843065,
-            "annualized_alpha": 0.07277743364614422,
-            "active_return": -0.5069720665887244,
-            "tracking_error": 0.3178038814450447,
-            "information_ratio": -1.5952356034279307
+            "beta_to_benchmark": 0.5618735790869038,
+            "annualized_alpha": -0.06724149755457395,
+            "active_return": -0.1652701123966222,
+            "tracking_error": 0.2042499738681451,
+            "information_ratio": -0.8091561005697527
         }
     }
 }

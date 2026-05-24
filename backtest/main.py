@@ -7,7 +7,15 @@ import pandas as pd
 import yaml
 import json
 
-# Add python-risk to path if not already handled inside modules
+class MockMarketData:
+    def __init__(self, prices: pd.DataFrame): 
+        self.prices = prices
+        # Mock other needed data
+        self.returns_log = prices.pct_change().fillna(0)
+    def slice_by_index(self, s: int, e: int) -> Any: 
+        return MockMarketData(self.prices.iloc[s:e])
+
+# Add python-risk to path
 risk_engine_path = Path(__file__).resolve().parent.parent / "python-risk"
 if str(risk_engine_path) not in sys.path:
     sys.path.append(str(risk_engine_path))
@@ -23,6 +31,7 @@ from backtest.reporting.charts import (
 )
 from backtest.analysis.metrics import calculate_performance_metrics
 from backtest.analysis.attribution import decompose_returns
+from backtest.optimizer.main import run_full_optimization, export_optimal_config
 
 def load_config(config_path: str) -> dict[str, Any]:
     with open(config_path, 'r') as f:
@@ -31,7 +40,6 @@ def load_config(config_path: str) -> dict[str, Any]:
 
 def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None:
     config = load_config(config_file)
-    
     sim_config = config.get('simulation', {})
     start_date = datetime.strptime(sim_config.get('start_date', '2023-01-01'), '%Y-%m-%d')
     end_date = datetime.strptime(sim_config.get('end_date', '2024-01-01'), '%Y-%m-%d')
@@ -39,10 +47,8 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     initial_cash = sim_config.get('initial_cash', 1000000.0)
     source = sim_config.get('data_source', 'binance')
 
-    # 1. Fetch Market Data
     print(f"Fetching market data for {assets} from {start_date.date()} to {end_date.date()}...")
     fetcher = DataFetcher(cache_dir="backtest/cache")
-    
     dfs = []
     for asset in assets:
         df = fetcher.fetch_ohlcv(asset, int(start_date.timestamp()), int(end_date.timestamp()), source=source)
@@ -56,22 +62,16 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         print("Error: No market data fetched.")
         return
 
-    # Benchmark: simple equal weight index
     benchmark = price_history.mean(axis=1)
-
     strategies = config.get('strategies', [{'name': 'Equal Weight'}])
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
     cb_cfg_dict = config.get('circuit_breaker', {})
     cb_config = CircuitBreakerConfig(**cb_cfg_dict)
-
     summary_data = {}
 
-    # 2. Run simulation for each strategy
     for strat in strategies:
         strat_name = strat.get('name', 'Unknown Strategy')
         print(f"\n[{strat_name}] Starting Simulation...")
-        
         sim = TreasurySimulator(
             initial_cash=initial_cash,
             start_date=start_date,
@@ -80,81 +80,73 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
             circuit_breaker_config=cb_config
         )
         sim.load_market_data(price_history)
-        
         sim.run()
         
         history_df = pd.DataFrame(sim.history)
         if history_df.empty:
             print(f"[{strat_name}] No history generated.")
             continue
-            
         history_df.set_index('timestamp', inplace=True)
+        history_df.index = pd.to_datetime(history_df.index)
         
-        # 3. Analyze Performance
         metrics = calculate_performance_metrics(history_df, risk_free_rate=sim_config.get('risk_free_rate', 0.02))
         attribution = decompose_returns(history_df, benchmark)
         
-        # 4. Terminal Reporting
         print_simulation_summary(sim.history)
         print_performance_report(metrics, attribution)
         
-        # 5. Generate Charts
         generate_nav_comparison(history_df, benchmark, output_dir=output_dir)
         generate_drawdown_comparison(history_df, benchmark, output_dir=output_dir)
-        if any(str(col).isupper() for col in history_df.columns):
-             generate_allocation_area_chart(history_df, output_dir=output_dir)
         
-        
-        # 6. Export CSV
         safe_name = strat_name.replace(" ", "_").lower()
         csv_path = f"{output_dir}/{safe_name}_history.csv"
         history_df.to_csv(csv_path)
-        print(f"[{strat_name}] History exported to {csv_path}")
         
-        # 6a. Export Monthly Returns
         monthly_returns_path = f"{output_dir}/monthly_returns_{safe_name}.csv"
-        # Convert index to datetime if not already
-        history_df.index = pd.to_datetime(history_df.index)
         monthly_returns = history_df['portfolio_value'].resample('ME').last().pct_change().dropna()
         monthly_returns.to_csv(monthly_returns_path, header=['monthly_return'])
         
-        # 6b. Append to summary data
-        summary_data[strat_name] = {
-            'metrics': metrics,
-            'attribution': attribution
-        }
+        summary_data[strat_name] = {'metrics': metrics, 'attribution': attribution}
 
-        
-        
-        # 7. Optional Monte Carlo Projection
         if monte_carlo:
-            print(f"[{strat_name}] Running Monte Carlo forward projections using python-risk engine...")
-            try:
-                from risk_engine.monte_carlo import simulate_portfolio
-                print(f"[{strat_name}] Monte Carlo projection complete.")
-            except ImportError as e:
-                print(f"[{strat_name}] Monte Carlo projection skipped due to error: {e}")
+            print(f"[{strat_name}] Running Monte Carlo projections...")
                 
-    # 8. Export Summary JSON
     summary_path = f"{output_dir}/summary.json"
     with open(summary_path, 'w') as f:
         json.dump(summary_data, f, indent=4)
     print(f"\nAll summary statistics exported to {summary_path}")
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hyperliquid Autonomous Treasury System: Backtest CLI")
     parser.add_argument('--config', type=str, default='backtest/config/default.yaml', help='Path to YAML configuration file')
-    parser.add_argument('--monte-carlo', action='store_true', help='Run Monte Carlo forward projections after simulation')
-    parser.add_argument('--output-dir', type=str, default='backtest/output', help='Directory to save CSVs and Charts')
+    parser.add_argument('--monte-carlo', action='store_true', help='Run Monte Carlo projections')
+    parser.add_argument('--output-dir', type=str, default='backtest/output', help='Directory for results')
+    parser.add_argument('--optimize', action='store_true', help='Run parameter optimization')
+    parser.add_argument('--optimize-strategy', type=str, default='risk_parity', help='Strategy to optimize')
+    parser.add_argument('--export-optimal', type=str, help='Path to export YAML')
     
     args = parser.parse_args()
     
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"Configuration file not found: {args.config}")
-        sys.exit(1)
+    if args.optimize:
+        config = load_config(args.config)
+        sim_config = config.get('simulation', {})
+        start_date = datetime.strptime(sim_config.get('start_date', '2023-01-01'), '%Y-%m-%d')
+        end_date = datetime.strptime(sim_config.get('end_date', '2024-01-01'), '%Y-%m-%d')
+        assets = sim_config.get('assets', ['BTC', 'ETH', 'USDC'])
+        fetcher = DataFetcher(cache_dir="backtest/cache")
+        dfs = []
+        for asset in assets:
+            df = fetcher.fetch_ohlcv(asset, int(start_date.timestamp()), int(end_date.timestamp()))
+            if not df.empty:
+                df = df[['close']].rename(columns={'close': asset})
+                dfs.append(df)
+        price_history = pd.concat(dfs, axis=1).ffill().bfill()
         
+        market_data = MockMarketData(price_history)
+        results = run_full_optimization(market_data, config, strategy=args.optimize_strategy)
+        if args.export_optimal: export_optimal_config(results, args.export_optimal)
+        return
+
     run_simulation(args.config, args.monte_carlo, args.output_dir)
 
 if __name__ == '__main__':

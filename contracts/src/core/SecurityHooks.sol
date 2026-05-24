@@ -5,12 +5,15 @@ import {ISecurityHooks} from "../interfaces/ISecurityHooks.sol";
 import {IOracleAdapter} from "../interfaces/IOracleAdapter.sol";
 import {IAssetRegistry} from "../interfaces/IAssetRegistry.sol";
 import {ITreasuryVault} from "../interfaces/ITreasuryVault.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Vault__GasPriceTooHigh, Vault__DailyVolumeCap, Vault__TradeCooldown, Vault__CircuitBreakerActive, Vault__VelocityLimitBreached, Vault__SlippageExceeded, Vault__MaxTradeSize, Vault__DrawdownLimitExceeded, Vault__GrossNotionalExceeded, Vault__NetDeltaExceeded, Vault__StrategyConcentration} from "../errors/VaultErrors.sol";
 
 contract SecurityHooks is ISecurityHooks {
     IOracleAdapter public oracleAdapter;
     IAssetRegistry public assetRegistry;
     ITreasuryVault public vault;
+
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
     uint256 public constant MAX_SLIPPAGE_BPS = 100;
     uint256 public constant MAX_TRADE_USD = 500_000e18; // $500k
@@ -23,6 +26,9 @@ contract SecurityHooks is ISecurityHooks {
     uint256 public maxTotalStrategyBps = 6000;
     uint256 public maxDrawdownBps = 2000;
     uint256 public maxDailyOutflowBps = 1500;
+    
+    bool public recoveryPhaseActive;
+    uint256 public recoveryMaxVolatileBps;
 
     mapping(bytes32 => uint256) public lastTradeTimestamp;
     uint256 public dailyVolumeUsed;
@@ -39,6 +45,12 @@ contract SecurityHooks is ISecurityHooks {
         oracleAdapter = IOracleAdapter(_oracleAdapter);
         assetRegistry = IAssetRegistry(_assetRegistry);
         vault = ITreasuryVault(_vault);
+    }
+
+    function setRecoveryPhase(bool active, uint256 maxVolatileBps) external {
+        require(IAccessControl(address(vault)).hasRole(GUARDIAN_ROLE, msg.sender), "Only guardian");
+        recoveryPhaseActive = active;
+        recoveryMaxVolatileBps = maxVolatileBps;
     }
 
     function _getAssetPriceAndStatus(address token) internal view returns (uint256 price, IOracleAdapter.PriceStatus status) {
@@ -107,6 +119,15 @@ contract SecurityHooks is ISecurityHooks {
             uint256 amountOutUSD = (params.amountOut * priceOut) / 1e18;
             (bool validAlloc, string memory reasonAlloc) = assetRegistry.validateAllocation(params.tokenOut, amountOutUSD, totalPortfolioUSD);
             if (!validAlloc) return ValidationResult(false, reasonAlloc, 1);
+            
+            if (recoveryPhaseActive) {
+                IAssetRegistry.AssetConfig memory config = assetRegistry.getAssetConfig(params.tokenOut);
+                if (config.tier != IAssetRegistry.RiskTier.STABLE) {
+                    if ((amountOutUSD * 10000) / totalPortfolioUSD > recoveryMaxVolatileBps) {
+                        return ValidationResult(false, "Rule 2: Exceeds recovery volatile cap", 1);
+                    }
+                }
+            }
             
             // Note: selling an asset entirely is okay (0 >= minAllocationBps for most) handles inside validateAllocation
         }

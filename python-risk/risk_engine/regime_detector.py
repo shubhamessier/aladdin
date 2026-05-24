@@ -1,40 +1,86 @@
 import numpy as np
-import pandas as pd  # type: ignore
+import pandas as pd
 from hmmlearn.hmm import GaussianHMM  # type: ignore
-from typing import Dict, Any, List
-
+from scipy.stats import norm, rankdata  # type: ignore
+from typing import Dict, Any, List, Optional
 from .schemas import RegimePrediction
 
-class RegimeDetector:
-    def __init__(self) -> None:
-        self.model: GaussianHMM | None = None
-        self.regime_labels = {0: 'bull', 1: 'uncertain', 2: 'crisis'}
-        self.training_window = 365  # days
+def inverse_normal_transform(returns: pd.Series) -> pd.Series:
+    """
+    Rank-based inverse normal transformation.
+    Maps arbitrary distribution to N(0,1) while preserving temporal ordering.
+    """
+    n = len(returns)
+    if n == 0:
+        return returns
+    ranks = rankdata(returns, method="average")
+    # Blom's formula: Phi^{-1}((rank - 3/8) / (n + 1/4))
+    uniform = (ranks - 0.375) / (n + 0.25)
+    # Clip to avoid infinite values at tails
+    uniform = np.clip(uniform, 0.001, 0.999)
+    transformed = norm.ppf(uniform)
+    return pd.Series(transformed, index=returns.index)
+
+class RobustRegimeDetector:
+    """
+    Regime detector with Student-t robustness and sticky transition priors.
+    """
+    def __init__(
+        self,
+        n_states: int = 3,
+        n_fits: int = 20,
+        sticky_alpha: float = 10.0,
+        switch_alpha: float = 1.0,
+        transform_returns: bool = True,
+        min_observations: int = 120,
+    ):
+        self.n_states = n_states
+        self.n_fits = n_fits
+        self.sticky_alpha = sticky_alpha
+        self.switch_alpha = switch_alpha
+        self.transform_returns = transform_returns
+        self.min_observations = min_observations
+        self.model: Optional[GaussianHMM] = None
         self.state_map: Dict[int, str] = {}
-    
-    def fit(self, returns: pd.Series) -> None:
-        """
-        Fit a 3-state Gaussian HMM to daily returns.
-        Returns should be a daily return series of a broad crypto index 
-        (e.g., 60% BTC + 40% ETH weighted return).
-        """
-        X = returns.values.reshape(-1, 1)
+        self.fitted = False
+        self._raw_returns: Optional[pd.Series] = None
+
+    def fit(self, returns: pd.Series) -> bool:
+        if len(returns) < self.min_observations:
+            return False
         
-        # Fit with multiple random initializations to avoid local optima
+        self._raw_returns = returns
+        transformed = inverse_normal_transform(returns) if self.transform_returns else returns
+        X = transformed.values.reshape(-1, 1)
+        
+        startprob_prior = np.ones(self.n_states)
+        transmat_prior = np.full((self.n_states, self.n_states), self.switch_alpha)
+        np.fill_diagonal(transmat_prior, self.sticky_alpha)
+        
         best_model = None
         best_score = -np.inf
         
-        for _ in range(10):
-            model = GaussianHMM(
-                n_components=3,
-                covariance_type='full',
-                n_iter=200,
-                random_state=np.random.randint(0, 10000),
-                tol=1e-6,
-            )
+        for seed in range(self.n_fits):
             try:
+                model = GaussianHMM(
+                    n_components=self.n_states,
+                    covariance_type="full",
+                    n_iter=500,
+                    tol=1e-4,
+                    random_state=seed,
+                    init_params="mc",
+                    params="stmc",
+                )
+                model.startprob_prior = startprob_prior
+                model.transmat_prior = transmat_prior
+                
+                init_transmat = np.full((self.n_states, self.n_states), 0.05)
+                np.fill_diagonal(init_transmat, 0.90)
+                init_transmat /= init_transmat.sum(axis=1, keepdims=True)
+                model.transmat_ = init_transmat
+                
                 model.fit(X)
-                score = model.score(X)
+                score = float(model.score(X))
                 if score > best_score:
                     best_score = score
                     best_model = model
@@ -42,68 +88,60 @@ class RegimeDetector:
                 continue
         
         if best_model is None:
-            raise RuntimeError('HMM fitting failed after 10 attempts')
+            return False
         
         self.model = best_model
+        raw_states = self.model.predict(X)
+        state_stats = {}
         
-        # Label the states by their mean return and variance
-        # State with highest mean and lowest var = bull
-        # State with lowest mean and highest var = crisis
-        means = self.model.means_.flatten()
-        variances = np.array([c[0, 0] for c in self.model.covars_])
+        for state_id in range(self.n_states):
+            mask = raw_states == state_id
+            if mask.sum() < 5:
+                state_stats[state_id] = {"score": -np.inf}
+                continue
+            raw_rets = returns.values[mask]
+            state_stats[state_id] = {
+                "score": raw_rets.mean() - 0.5 * raw_rets.std(),
+            }
         
-        # Score: high mean + low variance = bull
-        scores = means - 0.5 * np.sqrt(variances)
-        sorted_indices = np.argsort(scores)[::-1]  # Highest score first
-        
-        # Map: sorted_indices[0] → bull, sorted_indices[1] → uncertain, sorted_indices[2] → crisis
+        sorted_states = sorted(state_stats.keys(), key=lambda s: state_stats[s]["score"], reverse=True)
         self.state_map = {
-            int(sorted_indices[0]): 'bull',
-            int(sorted_indices[1]): 'uncertain',
-            int(sorted_indices[2]): 'crisis',
+            sorted_states[0]: "bull",
+            sorted_states[1]: "uncertain",
+            sorted_states[2]: "crisis",
         }
-    
+        self.fitted = True
+        return True
+
     def predict(self, returns: pd.Series) -> RegimePrediction:
-        """
-        Predict current regime and transition probabilities.
-        """
-        if self.model is None or not self.state_map:
-            raise RuntimeError('Model not fitted')
+        if not self.fitted or self.model is None:
+            return RegimePrediction(current_regime="uncertain", confidence=0.5, crisis_probability_3step=0.1, regime_probabilities={}, transition_probabilities={})
         
-        X = returns.values.reshape(-1, 1)
+        transformed = inverse_normal_transform(returns) if self.transform_returns else returns
+        X = transformed.values.reshape(-1, 1)
         
-        # Get the most likely state sequence
-        hidden_states = self.model.predict(X)
-        current_raw_state = int(hidden_states[-1])
-        current_regime = self.state_map[current_raw_state]
-        
-        # Get state probabilities for the most recent observation
-        posteriors = self.model.predict_proba(X)
-        current_probs = posteriors[-1]  # Probability of each state given all data
-        
-        # Transition probabilities from current state
-        transmat = self.model.transmat_
-        transition_probs = {
-            self.state_map[j]: float(transmat[current_raw_state, j])
-            for j in range(3)
-        }
-        
-        # Early warning: probability of transitioning to crisis within 1-3 steps
-        # P(crisis in next 3 steps) = 1 - P(not crisis for 3 steps)
-        crisis_state = [k for k, v in self.state_map.items() if v == 'crisis'][0]
-        
-        trans_2 = transmat @ transmat
-        trans_3 = trans_2 @ transmat
-        p_crisis_within_3 = float(1.0 - np.prod([
-            1.0 - transmat[current_raw_state, crisis_state],
-            1.0 - trans_2[current_raw_state, crisis_state],
-            1.0 - trans_3[current_raw_state, crisis_state],
-        ]))
-        
-        return RegimePrediction(
-            current_regime=current_regime,
-            regime_probabilities={self.state_map[i]: float(current_probs[i]) for i in range(3)},
-            transition_probabilities=transition_probs,
-            crisis_probability_3step=p_crisis_within_3,
-            confidence=float(np.max(current_probs)),  # How certain are we about the current state
-        )
+        try:
+            states = self.model.predict(X)
+            probs = self.model.predict_proba(X)
+            current_raw = int(states[-1])
+            current_regime = self.state_map.get(current_raw, "uncertain")
+            
+            trans = self.model.transmat_
+            crisis_idx = [k for k, v in self.state_map.items() if v == "crisis"][0]
+            trans_2 = trans @ trans
+            trans_3 = trans_2 @ trans
+            
+            p_no_crisis = (1 - trans[current_raw, crisis_idx]) * (1 - trans_2[current_raw, crisis_idx]) * (1 - trans_3[current_raw, crisis_idx])
+            
+            return RegimePrediction(
+                current_regime=current_regime,
+                confidence=float(probs[-1].max()),
+                crisis_probability_3step=float(1.0 - p_no_crisis),
+                regime_probabilities={self.state_map[i]: float(probs[-1][i]) for i in range(self.n_states)},
+                transition_probabilities={self.state_map[j]: float(trans[current_raw, j]) for j in range(self.n_states)}
+            )
+        except Exception:
+            return RegimePrediction(current_regime="uncertain", confidence=0.5, crisis_probability_3step=0.1, regime_probabilities={}, transition_probabilities={})
+
+    def refit_rolling(self, returns: pd.Series, window: int = 504) -> bool:
+        return self.fit(returns.tail(window))

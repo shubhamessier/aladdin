@@ -43,12 +43,45 @@ class AllocationStrategy:
     def __init__(self, config: StrategyConfig):
         self.config = config
         
+    def _apply_volatile_override(
+        self, 
+        weights: Dict[str, float], 
+        max_volatile_override: Optional[float]
+    ) -> Dict[str, float]:
+        """
+        Helper to enforce max volatile allocation limit.
+        """
+        if max_volatile_override is None:
+            return weights
+            
+        stable_assets = ["USDC", "USDT", "DAI"]
+        volatile_sum = sum(w for name, w in weights.items() if name not in stable_assets)
+        
+        if volatile_sum > max_volatile_override:
+            scale = max_volatile_override / volatile_sum if volatile_sum > 0 else 0.0
+            new_weights = {}
+            new_volatile_sum = 0.0
+            for name, w in weights.items():
+                if name not in stable_assets:
+                    new_weights[name] = w * scale
+                    new_volatile_sum += new_weights[name]
+                else:
+                    new_weights[name] = w
+            
+            # Re-allocate the difference to USDC
+            diff = volatile_sum - new_volatile_sum
+            new_weights["USDC"] = new_weights.get("USDC", 0.0) + diff
+            return new_weights
+            
+        return weights
+
     def generate_target_weights(
         self,
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         """
         Generate target weights. Must be implemented by subclasses.
@@ -61,13 +94,15 @@ class RiskParityStrategy(AllocationStrategy):
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         # Inverse volatility as a simple fallback approximation of risk parity
         vols = np.sqrt(np.diag(covariance_matrix))
         inv_vols = 1.0 / np.maximum(vols, 1e-6)
-        weights = inv_vols / np.sum(inv_vols)
-        return {name: float(w) for name, w in zip(asset_names, weights)}
+        weights_arr = inv_vols / np.sum(inv_vols)
+        weights = {name: float(w) for name, w in zip(asset_names, weights_arr)}
+        return self._apply_volatile_override(weights, max_volatile_override)
 
 class EqualWeightStrategy(AllocationStrategy):
     def generate_target_weights(
@@ -75,13 +110,15 @@ class EqualWeightStrategy(AllocationStrategy):
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         n = len(asset_names)
         if n == 0:
             return {}
         w = 1.0 / n
-        return {name: w for name in asset_names}
+        weights = {name: w for name in asset_names}
+        return self._apply_volatile_override(weights, max_volatile_override)
 
 class BuyAndHoldStrategy(AllocationStrategy):
     def generate_target_weights(
@@ -89,10 +126,11 @@ class BuyAndHoldStrategy(AllocationStrategy):
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         # Returns current weights (no rebalancing)
-        return current_weights
+        return self._apply_volatile_override(current_weights, max_volatile_override)
 
 class StaticConservativeStrategy(AllocationStrategy):
     def generate_target_weights(
@@ -100,7 +138,8 @@ class StaticConservativeStrategy(AllocationStrategy):
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         # Simple static allocation prioritizing stablecoins
         stable_assets = ["USDC", "USDT", "DAI"]
@@ -113,6 +152,10 @@ class StaticConservativeStrategy(AllocationStrategy):
             
         stable_pct = getattr(self.config, 'stablecoin_allocation_pct', 0.8)
         volatile_pct = getattr(self.config, 'volatile_allocation_pct', 0.2)
+        
+        if max_volatile_override is not None:
+            volatile_pct = min(volatile_pct, max_volatile_override)
+            stable_pct = 1.0 - volatile_pct
         
         if stables_present:
             w_stable = stable_pct / len(stables_present)
@@ -134,28 +177,30 @@ class MinVarianceStrategy(AllocationStrategy):
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         # Approximate with inverse covariance 
         try:
             inv_cov = np.linalg.inv(covariance_matrix)
             ones = np.ones(len(asset_names))
-            weights = inv_cov @ ones
-            weights = weights / np.sum(weights)
+            weights_arr = inv_cov @ ones
+            weights_arr = weights_arr / np.sum(weights_arr)
             # Clip negative weights for simple long-only
-            weights = np.maximum(weights, 0)
-            sum_w = np.sum(weights)
+            weights_arr = np.maximum(weights_arr, 0)
+            sum_w = np.sum(weights_arr)
             if sum_w > 0:
-                weights = weights / sum_w
+                weights_arr = weights_arr / sum_w
             else:
-                weights = np.ones(len(asset_names)) / len(asset_names)
+                weights_arr = np.ones(len(asset_names)) / len(asset_names)
         except np.linalg.LinAlgError:
             # Fallback to inverse volatility if singular
             vols = np.sqrt(np.diag(covariance_matrix))
             inv_vols = 1.0 / np.maximum(vols, 1e-6)
-            weights = inv_vols / np.sum(inv_vols)
+            weights_arr = inv_vols / np.sum(inv_vols)
             
-        return {name: float(w) for name, w in zip(asset_names, weights)}
+        weights = {name: float(w) for name, w in zip(asset_names, weights_arr)}
+        return self._apply_volatile_override(weights, max_volatile_override)
 
 class BlackLittermanStrategy(AllocationStrategy):
     def generate_target_weights(
@@ -163,25 +208,27 @@ class BlackLittermanStrategy(AllocationStrategy):
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         # Using the expected returns generated by the BL model from risk engine
         try:
             # simple target: w ~ inv(Cov) * Expected_Returns
             inv_cov = np.linalg.inv(covariance_matrix)
             mu = np.array([expected_returns.get(name, 0.0) for name in asset_names])
-            weights = inv_cov @ mu
+            weights_arr = inv_cov @ mu
             # Normalize and clip
-            weights = np.maximum(weights, 0)
-            sum_w = np.sum(weights)
+            weights_arr = np.maximum(weights_arr, 0)
+            sum_w = np.sum(weights_arr)
             if sum_w > 0:
-                weights = weights / sum_w
+                weights_arr = weights_arr / sum_w
             else:
-                weights = np.ones(len(asset_names)) / len(asset_names)
+                weights_arr = np.ones(len(asset_names)) / len(asset_names)
         except np.linalg.LinAlgError:
-            weights = np.ones(len(asset_names)) / len(asset_names)
+            weights_arr = np.ones(len(asset_names)) / len(asset_names)
             
-        return {name: float(w) for name, w in zip(asset_names, weights)}
+        weights = {name: float(w) for name, w in zip(asset_names, weights_arr)}
+        return self._apply_volatile_override(weights, max_volatile_override)
 
 class RegimeAdaptiveStrategy(AllocationStrategy):
     def generate_target_weights(
@@ -189,11 +236,13 @@ class RegimeAdaptiveStrategy(AllocationStrategy):
         current_weights: Dict[str, float],
         expected_returns: Dict[str, float],
         covariance_matrix: np.ndarray,
-        asset_names: List[str]
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None
     ) -> Dict[str, float]:
         # This wrapper expects an external signal for the current regime
         # Fallback to risk-parity structurally
         vols = np.sqrt(np.diag(covariance_matrix))
         inv_vols = 1.0 / np.maximum(vols, 1e-6)
-        weights = inv_vols / np.sum(inv_vols)
-        return {name: float(w) for name, w in zip(asset_names, weights)}
+        weights_arr = inv_vols / np.sum(inv_vols)
+        weights = {name: float(w) for name, w in zip(asset_names, weights_arr)}
+        return self._apply_volatile_override(weights, max_volatile_override)

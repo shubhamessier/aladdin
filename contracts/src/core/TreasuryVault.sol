@@ -38,6 +38,14 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         uint256 snapshotCount;
         uint256 portfolioHighWaterMark;
         
+        uint256 hwmAbsolute;
+        uint256 hwmEffective;
+        uint256 hwmLastUpdatedTimestamp;
+        uint256 hwmDecayHalflifeSeconds;
+        uint256 cbLevelSetTimestamp;
+        uint256 cbNoFurtherDropSince;
+        uint256 cbConsecutiveStableDays;
+        
         uint256 cbLevel1Bps;
         uint256 cbLevel2Bps;
         uint256 cbLevel3Bps;
@@ -101,6 +109,9 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         $.cbLevel2Bps = 2000;
         $.cbLevel3Bps = 3500;
         $.cbWindowSeconds = 3600;
+        
+        $.hwmDecayHalflifeSeconds = 90 days;
+        $.hwmLastUpdatedTimestamp = block.timestamp;
         
         $.maxSlippageBps = 100;
         $.maxTradeUSD = 500_000e18;
@@ -313,7 +324,46 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
             $.portfolioHighWaterMark = data.totalPortfolioUSD;
         }
         
+        if(data.totalPortfolioUSD > $.hwmAbsolute) {
+            $.hwmAbsolute = data.totalPortfolioUSD;
+            $.hwmLastUpdatedTimestamp = block.timestamp;
+        }
+        $.hwmEffective = _computeEffectiveHWM();
+        
+        if(data.totalPortfolioUSD < $.cbNoFurtherDropSince || $.cbNoFurtherDropSince == 0) {
+            $.cbNoFurtherDropSince = data.totalPortfolioUSD;
+            $.cbConsecutiveStableDays = 0;
+        } else if (block.timestamp >= $.cbLevelSetTimestamp + ($.cbConsecutiveStableDays + 1) * 1 days) {
+            $.cbConsecutiveStableDays++;
+        }
+        
         _checkCircuitBreaker(data.totalPortfolioUSD);
+    }
+
+    function _computeEffectiveHWM() internal view returns (uint256) {
+        TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
+        if ($.hwmAbsolute == 0) return 0;
+        uint256 elapsed = block.timestamp - $.hwmLastUpdatedTimestamp;
+        if (elapsed == 0) return $.hwmAbsolute;
+        
+        uint256 halflives = elapsed / $.hwmDecayHalflifeSeconds;
+        if (halflives >= 64) return 0; 
+        
+        uint256 decayedValue = $.hwmAbsolute >> halflives;
+        uint256 remainder = elapsed % $.hwmDecayHalflifeSeconds;
+        if (remainder > 0) {
+            decayedValue = decayedValue - (decayedValue * remainder) / (2 * $.hwmDecayHalflifeSeconds);
+        }
+        return decayedValue;
+    }
+
+    function decayCBLevel() external onlyRole(GUARDIAN_ROLE) {
+        TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
+        if ($.currentCBLevel == 0) return;
+        if (block.timestamp < $.cbLevelSetTimestamp + 1 days) revert Vault__CBDecayTooSoon();
+        
+        $.currentCBLevel--;
+        $.cbLevelSetTimestamp = block.timestamp;
     }
 
     function _checkCircuitBreaker(uint256 currentValue) internal {
@@ -322,7 +372,6 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         
         uint256 targetTime = block.timestamp > $.cbWindowSeconds ? block.timestamp - $.cbWindowSeconds : 0;
         
-        // Find closest snapshot (simple linear scan backward for small buffer)
         uint256 refValue = currentValue;
         for(uint256 i = 1; i <= $.snapshotCount; i++) {
             uint256 idx = ($.snapshotIndex + 720 - i) % 720;
@@ -332,19 +381,32 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
             }
         }
         
+        uint256 windowDropBps = 0;
         if(currentValue < refValue && refValue > 0) {
-            uint256 dropBps = ((refValue - currentValue) * 10000) / refValue;
-            uint8 newLevel = $.currentCBLevel;
+            windowDropBps = ((refValue - currentValue) * 10000) / refValue;
+        }
+
+        uint256 hwmDropBps = 0;
+        if (currentValue < $.hwmEffective && $.hwmEffective > 0) {
+            hwmDropBps = (($.hwmEffective - currentValue) * 10000) / $.hwmEffective;
+        }
+        
+        uint8 newLevel = $.currentCBLevel;
+        
+        if(windowDropBps >= $.cbLevel3Bps || hwmDropBps >= 3500) newLevel = 3;
+        else if((windowDropBps >= $.cbLevel2Bps || hwmDropBps >= 2000) && $.currentCBLevel < 3) newLevel = 2;
+        else if((windowDropBps >= $.cbLevel1Bps || hwmDropBps >= 1000) && $.currentCBLevel < 2) newLevel = 1;
+        
+        if(newLevel > $.currentCBLevel) {
+            $.currentCBLevel = newLevel;
+            $.cbActivatedAt = block.timestamp;
+            $.cbLevelSetTimestamp = block.timestamp;
+            $.cbNoFurtherDropSince = currentValue;
+            $.cbConsecutiveStableDays = 0;
             
-            if(dropBps >= $.cbLevel3Bps) newLevel = 3;
-            else if(dropBps >= $.cbLevel2Bps && $.currentCBLevel < 3) newLevel = 2;
-            else if(dropBps >= $.cbLevel1Bps && $.currentCBLevel < 2) newLevel = 1;
-            
-            if(newLevel > $.currentCBLevel) {
-                $.currentCBLevel = newLevel;
-                $.cbActivatedAt = block.timestamp;
-                emit CircuitBreakerTriggered(newLevel, currentValue, refValue, dropBps);
-            }
+            uint256 triggerDrop = windowDropBps > hwmDropBps ? windowDropBps : hwmDropBps;
+            uint256 triggerRef = windowDropBps > hwmDropBps ? refValue : $.hwmEffective;
+            emit CircuitBreakerTriggered(newLevel, currentValue, triggerRef, triggerDrop);
         }
     }
 

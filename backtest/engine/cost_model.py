@@ -1,46 +1,64 @@
+import numpy as np
 from pydantic import BaseModel
-from typing import Dict
+from dataclasses import dataclass
+
+@dataclass
+class TradeCost:
+    dex_fee: float
+    impact_cost: float
+    permanent_impact_cost: float
+    gas_cost: float
+    mev_cost: float
+    total: float
+    total_bps: float
 
 class CostModelConfig(BaseModel):
-    dex_fee_bps: float = 30.0  # 0.3% default
-    gas_cost_usd: float = 5.0
-    mev_slippage_bps: float = 5.0
+    dex_fee_bps: float = 5.0
     impact_coefficient: float = 0.1
-    impact_exponent: float = 0.5
+    permanent_impact_coeff: float = 0.05
+    gas_cost_per_trade_usd: float = 2.0
+    mev_threshold_usd: float = 25000.0
+    mev_cost_bps: float = 5.0
+    twap_threshold_usd: float = 100000.0
 
 class TransactionCostModel:
     def __init__(self, config: CostModelConfig):
         self.config = config
-        
+
     def estimate_cost(
-        self, 
-        trade_size_usd: float, 
-        asset_volatility: float, 
+        self,
+        trade_size_usd: float,
+        asset: str,
+        direction: str,
+        pool_liquidity_usd: float,
         daily_volume_usd: float,
-        is_maker: bool = False
-    ) -> float:
-        """
-        Estimate the total transaction cost including fees, slippage, and gas.
-        Handles zero volume safely.
-        """
-        if trade_size_usd <= 0.0:
-            return 0.0
+        asset_volatility: float = 0.03
+    ) -> TradeCost:
+        if trade_size_usd <= 0:
+            return TradeCost(0,0,0,0,0,0,0)
             
-        # 1. DEX Fee
-        dex_fee = 0.0 if is_maker else (trade_size_usd * self.config.dex_fee_bps / 10000.0)
+        dex_fee = trade_size_usd * self.config.dex_fee_bps / 10000
+        adv = max(daily_volume_usd, 1e6)
+        participation_rate = trade_size_usd / adv
+        temporary_impact = self.config.impact_coefficient * asset_volatility * np.sqrt(participation_rate)
+        impact_cost = trade_size_usd * temporary_impact
+        permanent_impact = self.config.permanent_impact_coeff * (trade_size_usd / adv) ** 0.6
+        permanent_cost = trade_size_usd * permanent_impact
+        gas_cost = self.config.gas_cost_per_trade_usd
         
-        # 2. Slippage (Almgren-Chriss style temporary impact)
-        slippage_cost = 0.0
-        if daily_volume_usd > 0.0:
-            volume_fraction = trade_size_usd / daily_volume_usd
-            # Impact = sigma * eta * (v/V)^beta
-            impact_fraction = asset_volatility * self.config.impact_coefficient * (volume_fraction ** self.config.impact_exponent)
-            slippage_cost = trade_size_usd * impact_fraction
-            
-        # 3. MEV / Additional Slippage
-        mev_cost = trade_size_usd * self.config.mev_slippage_bps / 10000.0
+        mev_cost = 0.0
+        if trade_size_usd > self.config.mev_threshold_usd:
+            mev_cost = trade_size_usd * self.config.mev_cost_bps / 10000
+            if trade_size_usd > self.config.twap_threshold_usd:
+                mev_cost *= 0.3
         
-        # 4. Gas Cost
-        gas_cost = self.config.gas_cost_usd
-        
-        return dex_fee + slippage_cost + mev_cost + gas_cost
+        total = dex_fee + impact_cost + permanent_cost + gas_cost + mev_cost
+        return TradeCost(
+            dex_fee=dex_fee,
+            impact_cost=impact_cost,
+            permanent_impact_cost=permanent_cost,
+            gas_cost=gas_cost,
+            mev_cost=mev_cost,
+            total=total,
+            total_bps=total / trade_size_usd * 10000
+        )

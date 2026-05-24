@@ -1,25 +1,25 @@
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
-import numpy as np
+from typing import List, Dict, Any, Optional
 import pandas as pd
+import numpy as np
 
-# Add python-risk to path to allow importing risk_engine
-risk_engine_path = Path(__file__).resolve().parent.parent.parent / "python-risk"
+# Add risk engine to path
+risk_engine_path = Path(__file__).resolve().parent.parent / "python-risk"
 if str(risk_engine_path) not in sys.path:
     sys.path.append(str(risk_engine_path))
 
-from .portfolio import PortfolioState, DerivativePosition
-from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
-from .yield_engine import YieldEngine, YieldConfig
-from .hedger import HedgingEngine, HedgingConfig
-
-# Import Risk Engine Models
-from risk_engine.regime_detector import RegimeDetector
+from risk_engine.regime_detector import RobustRegimeDetector
 from risk_engine.portfolio_optimizer import optimize_risk_parity
-from risk_engine.schemas import TierConstraint
+from risk_engine.schemas import RegimePrediction, PortfolioWeights, TierConstraint
 from risk_engine.var_models import compute_historical_var
+from risk_engine.covariance import build_covariance
+
+from backtest.engine.portfolio import PortfolioState
+from backtest.engine.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, RecoveryPhase, compute_effective_hwm
+from backtest.engine.yield_engine import YieldEngine
+from backtest.engine.cost_model import TransactionCostModel, CostModelConfig
 
 class TreasurySimulator:
     def __init__(
@@ -28,238 +28,146 @@ class TreasurySimulator:
         start_date: datetime,
         end_date: datetime,
         assets: List[str],
-        circuit_breaker_config: Optional[CircuitBreakerConfig] = None,
-        yield_config: Optional[YieldConfig] = None,
-        hedger_config: Optional[HedgingConfig] = None
+        circuit_breaker_config: CircuitBreakerConfig,
     ):
-        self.state = PortfolioState(timestamp=start_date, cash=initial_cash)
+        self.portfolio = PortfolioState(
+            timestamp=start_date,
+            portfolio_value=initial_cash,
+            cash=initial_cash,
+            weights={a: 0.0 for a in assets}
+        )
+        self.assets = assets
         self.start_date = start_date
         self.end_date = end_date
-        self.assets = assets
-        self.current_date = start_date
-        
-        self.circuit_breaker = CircuitBreaker(circuit_breaker_config or CircuitBreakerConfig())
-        self.yield_engine = YieldEngine(yield_config or YieldConfig())
-        self.hedging_engine = HedgingEngine(hedger_config or HedgingConfig())
-        self.regime_detector = RegimeDetector()
+        self.cb = CircuitBreaker(circuit_breaker_config)
+        self.recovery = RecoveryPhase()
+        self.yield_engine = YieldEngine()
+        self.cost_model = TransactionCostModel(CostModelConfig())
+        self.regime_detector = RobustRegimeDetector()
         
         self.history: List[Dict[str, Any]] = []
-        self.market_prices: Dict[str, float] = {}
-        self.price_history_df: pd.DataFrame = pd.DataFrame()
+        self.market_data: pd.DataFrame = pd.DataFrame()
+        self.current_day = 0
         
-        self.current_regime: str = "uncertain"
-        self.cb_level: int = 0
-        
-        self._target_weights: Dict[str, float] = {}
+        self.vol_history_30d: List[float] = []
+        self.avg_vol_lifetime: float = 0.02
 
-    def load_market_data(self, price_history: pd.DataFrame):
-        """
-        price_history should be a DataFrame indexed by datetime with asset symbols as columns.
-        """
-        self.price_history_df = price_history
-        # Pre-fit regime detector on a proxy (e.g. BTC or equal weight) if history is available
-        if not price_history.empty and len(price_history) > 60:
-            returns = price_history.pct_change().dropna().mean(axis=1) # Simple broad index
-            self.regime_detector.fit(returns)
+    def load_market_data(self, price_history: pd.DataFrame) -> None:
+        self.market_data = price_history
 
-    def run(self) -> dict[str, Any]:
-        """
-        Executes the 11-phase daily simulation loop.
-        """
-        while self.current_date <= self.end_date:
+    def run(self, verbose: bool = False) -> dict[str, Any]:
+        warmup = 60
+        for day in range(len(self.market_data)):
+            self.current_day = day
             self.step()
-            self.current_date += timedelta(days=1)
             
-    def step(self):
-        """
-        The 11-phase loop for a single timestep.
-        """
-        # Phase 1: Time Advancement
-        self.state.timestamp = self.current_date
+            if day >= warmup and day % 30 == 0:
+                lookback = self.market_data.iloc[max(0, day-504):day]
+                returns = lookback.pct_change().fillna(0).mean(axis=1)
+                self.regime_detector.refit_rolling(returns)
+                
+        return self.summary()
+
+    def step(self) -> None:
+        date = self.market_data.index[self.current_day]
+        prices = self.market_data.iloc[self.current_day]
         
-        # Phase 2: Market Data Update
-        self._update_market_data()
+        if self.current_day > 0:
+            prev_prices = self.market_data.iloc[self.current_day - 1]
+            new_val = self.portfolio.cash
+            for asset, weight in self.portfolio.weights.items():
+                if weight > 0:
+                    new_val += (self.portfolio.portfolio_value * weight) * (prices[asset] / prev_prices[asset])
+            self.portfolio.portfolio_value = new_val
+
+        returns_history = self.market_data.iloc[max(0, self.current_day-252):self.current_day+1].pct_change().fillna(0)
+        crypto_idx = returns_history.mean(axis=1)
+        regime_pred = self.regime_detector.predict(crypto_idx)
         
-        # Phase 3: State Snapshot / Mark-to-Market
-        portfolio_value = self.state.get_total_value(self.market_prices)
+        rolling_vol = crypto_idx.tail(30).std() if self.current_day > 10 else 0.02
+        self.vol_history_30d.append(rolling_vol)
+        self.avg_vol_lifetime = np.mean(self.vol_history_30d)
         
-        # Phase 4: Risk Assessment (VaR / Covariance)
-        var_95, cov_matrix = self._assess_risk(portfolio_value)
+        prev_cb_level = self.cb.current_level
+        current_cb_level = self.cb.update(date, self.portfolio.portfolio_value, rolling_vol, self.avg_vol_lifetime)
         
-        # Phase 5: Regime Detection
-        self._detect_regime()
-        
-        # Phase 6: Circuit Breaker Check
-        self.cb_level = self.circuit_breaker.update(self.current_date, portfolio_value)
-        
-        # Phase 7: Yield Harvesting
-        self._harvest_yield()
-        
-        # Phase 8: Hedging Rebalancing
-        hedge_actions = []
-        if self.cb_level < 2:  # Only hedge actively if not in deep circuit breaker
-            hedge_actions = self.hedging_engine.calculate_hedge_adjustments(
-                self.state, self.market_prices, self.current_regime
-            )
-            self._execute_hedges(hedge_actions)
+        # Track Effective HWM
+        days_since_hwm = (date - self.cb.last_peak_time).days if self.cb.last_peak_time else 0
+        eff_hwm = compute_effective_hwm(self.cb.hwm_absolute, self.portfolio.portfolio_value, days_since_hwm, self.cb.config.hwm_decay_halflife_days)
+
+        if prev_cb_level >= 2 and current_cb_level == 1 and not self.recovery.is_active:
+            self.recovery.enter(pd.Timestamp(date), self.portfolio.portfolio_value)
             
-        # Phase 9: Portfolio Optimization (Target weights)
-        if self.cb_level == 0:
-            self._optimize_portfolio(cov_matrix)
-        elif self.cb_level >= 2:
-            # Shift towards cash/stables in crisis
-            self._target_weights = {asset: 0.0 for asset in self.assets}
-            self._target_weights["USDC"] = 1.0
-            
-        # Phase 10: Trade Execution (Rebalancing to targets)
-        trade_volume = self._execute_trades(portfolio_value)
+        if self.recovery.is_active:
+            if (pd.Timestamp(date) - self.recovery.entry_date).days % 7 == 0:
+                self.recovery.advance_week()
+            if self.recovery.check_snap_back(self.portfolio.portfolio_value):
+                self.recovery.snap_back()
+                self.cb.current_level = 2
+                current_cb_level = 2
+
+        daily_yield = self.yield_engine.calculate_yield(self.portfolio.portfolio_value, self.portfolio.cash/self.portfolio.portfolio_value if self.portfolio.portfolio_value > 0 else 1.0, pd.Timestamp(date), regime_pred.current_regime)
+        self.portfolio.portfolio_value += daily_yield
         
-        # Phase 11: Logging / Reporting
-        new_value = self.state.get_total_value(self.market_prices)
+        if self.current_day % 7 == 0 and current_cb_level < 2:
+            try:
+                lookback_returns = returns_history.tail(self.current_day if self.current_day < 252 else 252)
+                if len(lookback_returns) > 20:
+                    cov = build_covariance(lookback_returns)
+                    res_weights = optimize_risk_parity(
+                        returns=lookback_returns,
+                        covariance=cov,
+                        assets=self.assets,
+                        min_stable_reserve=0.20 if regime_pred.current_regime != 'crisis' else 0.60
+                    )
+                    target_weights = res_weights.weights
+                else:
+                    target_weights = {a: 1.0/len(self.assets) for a in self.assets}
+            except Exception:
+                target_weights = {a: 1.0/len(self.assets) for a in self.assets}
+
+            if self.recovery.is_active:
+                max_vol = self.recovery.max_volatile_pct
+                total_vol = sum(target_weights[a] for a in self.assets if a not in ['USDC', 'USDT', 'DAI'])
+                if total_vol > max_vol:
+                    scale = max_vol / total_vol
+                    for a in target_weights:
+                        if a not in ['USDC', 'USDT', 'DAI']:
+                            target_weights[a] *= scale
+
+            total_trade = sum(abs(target_weights.get(a, 0) - self.portfolio.weights.get(a, 0)) for a in self.assets) * self.portfolio.portfolio_value
+            cost = self.cost_model.estimate_cost(total_trade, "ETH", "buy", 1e8, 1e7).total
+            self.portfolio.portfolio_value -= cost
+            self.portfolio.weights = target_weights
+            self.portfolio.cash = self.portfolio.portfolio_value * (1 - sum(target_weights.values()))
+
         self.history.append({
-            "timestamp": self.current_date,
-            "portfolio_value": new_value,
-            "cash": self.state.cash,
-            "regime": self.current_regime,
-            "cb_level": self.cb_level,
-            "var_95_1d": var_95,
-            "trade_volume_usd": trade_volume
+            "timestamp": date,
+            "portfolio_value": self.portfolio.portfolio_value,
+            "cash": self.portfolio.cash,
+            "regime": regime_pred.current_regime,
+            "cb_level": current_cb_level,
+            "effective_hwm": eff_hwm,
+            "recovery_active": self.recovery.is_active,
+            "var_95_1d": 0.0,
+            "trade_volume_usd": 0.0
         })
 
-    def _update_market_data(self):
-        if self.current_date in self.price_history_df.index:
-            row = self.price_history_df.loc[self.current_date]
-            for asset in self.assets:
-                if asset in row:
-                    self.market_prices[asset] = float(row[asset])
-
-    def _assess_risk(self, portfolio_value: float) -> tuple[float, np.ndarray]:
-        # Need at least 30 days of history up to current date
-        history_slice = self.price_history_df.loc[:self.current_date]
-        var_95 = 0.0
-        cov_matrix = np.eye(len(self.assets))
+    def summary(self) -> dict[str, Any]:
+        if not self.history: return {}
+        vals = [h["portfolio_value"] for h in self.history]
+        total_return = (vals[-1] - vals[0]) / vals[0]
         
-        if len(history_slice) > 30:
-            returns = history_slice[self.assets].pct_change().dropna()
-            cov_matrix = returns.cov().values
-            
-            # Use Risk Engine for VaR
-            # To compute historical var, we need an array of historical returns for the portfolio.
-            # Simplified: assuming current weights to compute portfolio historical returns
-            weights = np.zeros(len(self.assets))
-            for i, asset in enumerate(self.assets):
-                if asset in self.state.positions and self.market_prices.get(asset, 0) > 0:
-                    weights[i] = (self.state.positions[asset] * self.market_prices[asset]) / max(1, portfolio_value)
-                    
-            if len(returns) > 0:
-                port_returns = returns.values @ weights
-                # Assuming var_models interface: compute_historical_var(returns, value) -> dict
-                try:
-                    # Depending on exact sig, typically: compute_historical_var(returns, current_value)
-                    # Let's approximate using numpy percentiles since we can't inspect the exact var_models sig easily
-                    losses = -port_returns
-                    var_95 = float(np.percentile(losses, 95)) * portfolio_value
-                except Exception:
-                    pass
-                    
-        return var_95, cov_matrix
-
-    def _detect_regime(self) -> None:
-        history_slice = self.price_history_df.loc[:self.current_date]
-        if len(history_slice) > 30 and self.regime_detector.model is not None:
-            returns = history_slice.pct_change().dropna().mean(axis=1)
-            try:
-                prediction = self.regime_detector.predict(returns)
-                self.current_regime = prediction.current_regime
-            except Exception:
-                pass
-
-    def _harvest_yield(self) -> None:
-        token_yields, usd_yield = self.yield_engine.simulate_yield(
-            self.state, self.market_prices, dt_days=1.0
-        )
-        self.state.cash += usd_yield
-        for token, amt in token_yields.items():
-            self.state.positions[token] = self.state.positions.get(token, 0.0) + amt
-
-    def _execute_hedges(self, hedge_actions: List[Dict[str, Any]]):
-        # Simplified execution of hedge requests
-        for action in hedge_actions:
-            if action["action"] == "adjust_hedge":
-                symbol = action["symbol"]
-                adj_usd = action["delta_adjustment_usd"]
-                # For simplicity in simulation, just adjust derivative position size
-                # Positive delta = Long, Negative delta = Short
-                current_price = self.market_prices.get(symbol.replace("-PERP", ""), 1.0)
-                size_change = adj_usd / current_price
-                
-                # Find existing position
-                pos = next((p for p in self.state.derivative_positions if p.symbol == symbol), None)
-                if pos:
-                    pos.size += size_change
-                else:
-                    self.state.derivative_positions.append(DerivativePosition(
-                        symbol=symbol,
-                        size=size_change,
-                        entry_price=current_price,
-                        current_price=current_price,
-                        margin=abs(adj_usd) / action.get("target_leverage", 1.0),
-                        leverage=action.get("target_leverage", 1.0),
-                        is_long=(size_change > 0)
-                    ))
-                    # Deduct margin from cash
-                    self.state.cash -= abs(adj_usd) / action.get("target_leverage", 1.0)
-
-    def _optimize_portfolio(self, cov_matrix: np.ndarray):
-        bounds = [(0.0, 1.0) for _ in self.assets]
-        # Example constraints: max 20% in any volatile asset
-        tier_constraints = [TierConstraint(
-            asset_indices=[i for i, a in enumerate(self.assets) if a not in ["USDC", "USDT", "DAI"]],
-            min_total=0.0,
-            max_total=0.8
-        )]
-        try:
-            result = optimize_risk_parity(
-                covariance=cov_matrix,
-                bounds=bounds,
-                tier_constraints=tier_constraints
-            )
-            if result.converged:
-                for i, asset in enumerate(self.assets):
-                    self._target_weights[asset] = result.weights[i]
-        except Exception:
-            pass # Keep previous target weights if optimization fails
-
-    def _execute_trades(self, portfolio_value: float) -> float:
-        trade_volume = 0.0
-        if not self._target_weights:
-            return trade_volume
-            
-        current_weights = {}
-        for asset in self.assets:
-            if asset in self.state.positions and self.market_prices.get(asset, 0) > 0:
-                current_weights[asset] = (self.state.positions[asset] * self.market_prices[asset]) / portfolio_value
-            else:
-                current_weights[asset] = 0.0
-                
-        # Calculate target values and execute
-        for asset, target_w in self._target_weights.items():
-            if asset == "USDC":
-                continue # Cash handled implicitly
-                
-            current_val = current_weights.get(asset, 0.0) * portfolio_value
-            target_val = target_w * portfolio_value
-            diff_usd = target_val - current_val
-            
-            if abs(diff_usd) > 1000 and asset in self.market_prices: # Only trade if > $1k diff
-                price = self.market_prices[asset]
-                trade_size = diff_usd / price
-                
-                # Apply 10bps slippage/fee
-                cost = abs(diff_usd) * 0.001 
-                
-                self.state.positions[asset] = self.state.positions.get(asset, 0.0) + trade_size
-                self.state.cash -= (diff_usd + cost)
-                trade_volume += abs(diff_usd)
-                
-        return trade_volume
+        drawdowns = []
+        max_val = 0.0
+        for v in vals:
+            if v > max_val: max_val = v
+            drawdowns.append((max_val - v) / max_val if max_val > 0 else 0)
+        
+        return {
+            "total_return_pct": total_return * 100,
+            "annualized_return": ((1 + total_return) ** (365 / len(vals)) - 1),
+            "sharpe_ratio": (total_return * 100) / (np.std(vals) / np.mean(vals) * 100) if np.mean(vals) > 0 else 0,
+            "max_drawdown_pct": max(drawdowns) * 100,
+            "cb_days": sum(1 for h in self.history if h["cb_level"] > 0)
+        }

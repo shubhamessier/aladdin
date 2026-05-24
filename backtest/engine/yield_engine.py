@@ -1,58 +1,32 @@
-from pydantic import BaseModel
-from typing import Dict, Tuple
-from .portfolio import PortfolioState
+import pandas as pd
+from typing import Dict, Any
 
-class YieldConfig(BaseModel):
-    lending_rates: Dict[str, float] = {}  # token -> Annualized Rate (e.g. 0.05 for 5%)
-    staking_rates: Dict[str, float] = {}  # token -> Annualized Rate
-    funding_rates: Dict[str, float] = {}  # symbol -> Daily funding rate (e.g. 0.0001 for 1 bps)
-    basis_rates: Dict[str, float] = {}    # symbol -> Annualized basis yield
+LENDING_RATE_SCHEDULE = {
+    (2022, 2): 0.02, (2022, 3): 0.015, (2022, 4): 0.02,
+    (2023, 1): 0.03, (2023, 2): 0.04, (2023, 3): 0.05, (2023, 4): 0.05,
+    (2024, 1): 0.08, (2024, 2): 0.10, (2024, 3): 0.07, (2024, 4): 0.06,
+    (2025, 1): 0.05, (2025, 2): 0.04, (2025, 3): 0.04, (2025, 4): 0.04,
+    (2026, 1): 0.04, (2026, 2): 0.04,
+}
+
+FUNDING_RATE_BY_REGIME = {
+    "bull": 0.0005,
+    "uncertain": 0.0002,
+    "crisis": -0.0003,
+}
 
 class YieldEngine:
-    def __init__(self, config: YieldConfig):
-        self.config = config
+    def get_lending_rate(self, date: pd.Timestamp) -> float:
+        key = (date.year, (date.month - 1) // 3 + 1)
+        return LENDING_RATE_SCHEDULE.get(key, 0.04)
+
+    def calculate_yield(self, portfolio_value: float, cash_pct: float, date: pd.Timestamp, regime: str) -> float:
+        lending_rate = self.get_lending_rate(date)
+        funding_rate = FUNDING_RATE_BY_REGIME.get(regime, 0.0002) * 3 * 365 # Annualized
         
-    def simulate_yield(
-        self, 
-        state: PortfolioState, 
-        prices: Dict[str, float], 
-        dt_days: float
-    ) -> Tuple[Dict[str, float], float]:
-        """
-        Simulates yield over dt_days.
-        Returns:
-            token_yields: Dict[str, float] of yield in token amounts
-            usd_yield: float of yield that is directly in USD (like funding P&L)
-        """
-        token_yields: Dict[str, float] = {}
-        usd_yield = 0.0
+        # Assume 70% of cash is deployed to lending
+        daily_lending = (portfolio_value * cash_pct * 0.70) * (lending_rate / 365)
+        # Funding yield is more complex in real but for backtest we simplify
+        daily_funding = (portfolio_value * (1 - cash_pct) * 0.1) * (funding_rate / 365)
         
-        # 1. Lending Yield for Cash (assuming cash is USD/USDC)
-        cash_rate = self.config.lending_rates.get("USDC", 0.0)
-        if cash_rate > 0.0:
-            usd_yield += state.cash * (cash_rate * dt_days / 365.0)
-            
-        # 2. Staking/Lending Yield for Positions
-        for token, amount in state.positions.items():
-            rate = self.config.staking_rates.get(token, self.config.lending_rates.get(token, 0.0))
-            if rate > 0.0:
-                token_yields[token] = amount * (rate * dt_days / 365.0)
-                
-        # 3. Funding & Basis P&L for Derivatives
-        for pos in state.derivative_positions:
-            # Funding (paid/received in USD)
-            # If long, pay funding. If short, receive funding. 
-            # Note: positive rate -> longs pay shorts.
-            daily_funding = self.config.funding_rates.get(pos.symbol, 0.0)
-            direction = 1.0 if pos.is_long else -1.0
-            funding_pnl = pos.notional_value * daily_funding * dt_days * (-direction)
-            usd_yield += funding_pnl
-            
-            # Basis P&L (if we're running a basis trade)
-            # Typically a basis trade is long spot, short perp. The yield is the convergence.
-            basis_rate = self.config.basis_rates.get(pos.symbol, 0.0)
-            if basis_rate > 0.0 and not pos.is_long:
-                basis_pnl = pos.notional_value * (basis_rate * dt_days / 365.0)
-                usd_yield += basis_pnl
-                
-        return token_yields, usd_yield
+        return daily_lending + daily_funding
