@@ -1,0 +1,32 @@
+# Agent files
+gemini.log
+.gemini/
+GEMINI.md
+MEMORY.md
+plans/
+
+# Ignore all markdown files except README.md
+**/*.md
+*.md
+!**/README.md
+!README.md
+
+# Node
+node_modules/
+dist/
+.npm/
+package-lock.json
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.pytest_cache/
+
+# Foundry/Solidity
+cache/
+out/
+broadcast/
+lib/
