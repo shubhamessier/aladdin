@@ -74,7 +74,7 @@ class EventDrivenReplayEngine:
                 order.remaining_size = remaining
                 order.status = "PARTIAL"
 
-    def record_fill(self, order: Order, fill_size: float, fill_price: float, is_toxic: bool):
+    def record_fill(self, order: Order, fill_size: float, fill_price: float, is_toxic: bool) -> None:
         fee_bps = -0.2 if order.is_maker else 3.5
         fee_cost = (fill_size * fill_price) * (fee_bps / 10000)
         

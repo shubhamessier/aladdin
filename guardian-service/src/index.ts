@@ -56,11 +56,32 @@ interface ActionParameters {
 // ==========================================
 // 1. DETERMINISTIC STATE RECONCILIATION
 // ==========================================
+export interface OrderState {
+    id: string;
+    asset: string;
+    side: 'buy' | 'sell';
+    size: Decimal;
+    filled: Decimal;
+    status: 'open' | 'partial' | 'filled' | 'canceled';
+}
+
+export interface InventoryLedger {
+    cashUSD: Decimal;
+    positions: Map<string, Decimal>; // Asset -> Net Units
+}
+
 class EventSourcingLedger {
     private expectedSeqId: number = 0;
     private stateInvalidated: boolean = false;
     private readonly maxGapReplaySize = 5;
     private eventBuffer: Map<number, any> = new Map();
+    
+    // Authoritative State
+    public readonly inventory: InventoryLedger = {
+        cashUSD: new Decimal(1000000), // Starting balance
+        positions: new Map()
+    };
+    public readonly activeOrders: Map<string, OrderState> = new Map();
 
     public onWebSocketMessage(seqId: number, event: any) {
         if (this.stateInvalidated) return;
@@ -88,8 +109,48 @@ class EventSourcingLedger {
     }
 
     private applyEvent(event: any) {
-        // Deterministic double-entry accounting application
-        // e.g., Update balances, fill tracking, margin consumption
+        // Deterministic execution lifecycle
+        if (event.type === 'order_open') {
+            this.activeOrders.set(event.order.id, {
+                id: event.order.id,
+                asset: event.order.asset,
+                side: event.order.side,
+                size: new Decimal(event.order.size),
+                filled: new Decimal(0),
+                status: 'open'
+            });
+        } else if (event.type === 'order_fill') {
+            const order = this.activeOrders.get(event.fill.order_id);
+            if (!order) {
+                this.triggerEmergencySnapshotRecovery(`Received fill for unknown order ${event.fill.order_id}`);
+                return;
+            }
+            
+            const fillSize = new Decimal(event.fill.size);
+            const fillPrice = new Decimal(event.fill.price);
+            const fee = new Decimal(event.fill.fee);
+            const costUSD = fillSize.mul(fillPrice);
+
+            order.filled = order.filled.plus(fillSize);
+            if (order.filled.gte(order.size)) {
+                order.status = 'filled';
+                this.activeOrders.delete(order.id);
+            } else {
+                order.status = 'partial';
+            }
+
+            // Double Entry Accounting
+            const currentPos = this.inventory.positions.get(order.asset) || new Decimal(0);
+            if (order.side === 'buy') {
+                this.inventory.positions.set(order.asset, currentPos.plus(fillSize));
+                this.inventory.cashUSD = this.inventory.cashUSD.sub(costUSD).sub(fee);
+            } else {
+                this.inventory.positions.set(order.asset, currentPos.sub(fillSize));
+                this.inventory.cashUSD = this.inventory.cashUSD.plus(costUSD).sub(fee);
+            }
+        } else if (event.type === 'order_cancel') {
+            this.activeOrders.delete(event.order_id);
+        }
     }
 
     public async assertStateIntegrity(): Promise<void> {
@@ -170,29 +231,30 @@ class MicrostructureAnalyzer {
 // 3. INVENTORY MANAGEMENT (DELTA FLATTENING)
 // ==========================================
 class InventorySkewEngine {
-    constructor(private readonly maxDeltaUSD: Decimal) {}
+    constructor(private readonly maxDeltaUSDPerAsset: Decimal) {}
 
     public calculateRequiredHedges(exposures: PortfolioExposure[]): ActionParameters[] {
-        let netPortfolioDelta = new Decimal(0);
-        for (const exp of exposures) {
-            netPortfolioDelta = netPortfolioDelta.plus(exp.netDeltaUSD);
-        }
-
         const hedges: ActionParameters[] = [];
 
-        // If portfolio accumulates unintended directional bias beyond limits
-        if (netPortfolioDelta.abs().gt(this.maxDeltaUSD)) {
-            const hedgeSize = netPortfolioDelta.abs().sub(this.maxDeltaUSD.mul('0.5')); // Flatten to 50% of limit
-            
-            hedges.push({
-                id: `HEDGE-${Date.now()}`,
-                asset: 'ETH-PERP', // Proxy hedge
-                urgency: 1.0,      // Risk-reducing orders take urgency 1 (Taker)
-                targetSizeUSD: hedgeSize,
-                direction: netPortfolioDelta.gt(0) ? 'sell' : 'buy',
-                isHedge: true
-            });
-            console.log(`[INVENTORY] Unintended skew detected (Delta: $${netPortfolioDelta.toFixed(2)}). Generated flattening hedge.`);
+        for (const exp of exposures) {
+            // Factor neutrality: flatten delta PER ASSET, not globally via proxy
+            if (exp.netDeltaUSD.abs().gt(this.maxDeltaUSDPerAsset)) {
+                // Flatten to 50% of the limit to avoid rebalance churn
+                const targetReduction = exp.netDeltaUSD.abs().sub(this.maxDeltaUSDPerAsset.mul('0.5'));
+                
+                // Asset-matched hedge
+                const hedgeAsset = exp.asset.endsWith('-PERP') ? exp.asset : `${exp.asset}-PERP`;
+
+                hedges.push({
+                    id: `HEDGE-${exp.asset}-${Date.now()}`,
+                    asset: hedgeAsset,
+                    urgency: 1.0,      // Risk-reducing orders take urgency 1 (Taker)
+                    targetSizeUSD: targetReduction,
+                    direction: exp.netDeltaUSD.gt(0) ? 'sell' : 'buy',
+                    isHedge: true
+                });
+                console.log(`[INVENTORY] Unintended skew on ${exp.asset} (Delta: $${exp.netDeltaUSD.toFixed(2)}). Generated flattening hedge.`);
+            }
         }
 
         return hedges;

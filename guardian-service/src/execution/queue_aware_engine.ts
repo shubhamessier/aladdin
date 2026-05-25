@@ -20,6 +20,11 @@ export class QueueAwareExecutionEngine {
         // 2. Queue Evaporation Check
         const bestBid = bookState.bids[0];
         const bestAsk = bookState.asks[0];
+        
+        if (!bestBid || !bestAsk) {
+            return { execute: false, reason: "Orderbook is empty or disconnected." };
+        }
+
         const spread = bestAsk.price.sub(bestBid.price);
 
         // If the spread suddenly widens compared to rolling average (simulated here)

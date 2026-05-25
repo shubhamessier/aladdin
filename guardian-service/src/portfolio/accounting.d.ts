@@ -1,13 +1,14 @@
+import { Decimal } from 'decimal.js';
 import type { PortfolioState } from './state.js';
 export interface PnLReport {
-    realizedPnL: number;
-    unrealizedPnL: number;
-    totalYield: number;
+    realizedPnL: Decimal;
+    unrealizedPnL: Decimal;
+    totalYield: Decimal;
     components: {
-        lendingYield: number;
-        lpFees: number;
-        stakingYield: number;
-        funding: number;
+        lendingYield: Decimal;
+        lpFees: Decimal;
+        stakingYield: Decimal;
+        funding: Decimal;
     };
 }
 export declare class AccountingEngine {

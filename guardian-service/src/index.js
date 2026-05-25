@@ -24,14 +24,17 @@ export class RateLimitError extends Error {
         this.name = 'RateLimitError';
     }
 }
-// ==========================================
-// 1. DETERMINISTIC STATE RECONCILIATION
-// ==========================================
 class EventSourcingLedger {
     expectedSeqId = 0;
     stateInvalidated = false;
     maxGapReplaySize = 5;
     eventBuffer = new Map();
+    // Authoritative State
+    inventory = {
+        cashUSD: new Decimal(1000000), // Starting balance
+        positions: new Map()
+    };
+    activeOrders = new Map();
     onWebSocketMessage(seqId, event) {
         if (this.stateInvalidated)
             return;
@@ -58,8 +61,49 @@ class EventSourcingLedger {
         }
     }
     applyEvent(event) {
-        // Deterministic double-entry accounting application
-        // e.g., Update balances, fill tracking, margin consumption
+        // Deterministic execution lifecycle
+        if (event.type === 'order_open') {
+            this.activeOrders.set(event.order.id, {
+                id: event.order.id,
+                asset: event.order.asset,
+                side: event.order.side,
+                size: new Decimal(event.order.size),
+                filled: new Decimal(0),
+                status: 'open'
+            });
+        }
+        else if (event.type === 'order_fill') {
+            const order = this.activeOrders.get(event.fill.order_id);
+            if (!order) {
+                this.triggerEmergencySnapshotRecovery(`Received fill for unknown order ${event.fill.order_id}`);
+                return;
+            }
+            const fillSize = new Decimal(event.fill.size);
+            const fillPrice = new Decimal(event.fill.price);
+            const fee = new Decimal(event.fill.fee);
+            const costUSD = fillSize.mul(fillPrice);
+            order.filled = order.filled.plus(fillSize);
+            if (order.filled.gte(order.size)) {
+                order.status = 'filled';
+                this.activeOrders.delete(order.id);
+            }
+            else {
+                order.status = 'partial';
+            }
+            // Double Entry Accounting
+            const currentPos = this.inventory.positions.get(order.asset) || new Decimal(0);
+            if (order.side === 'buy') {
+                this.inventory.positions.set(order.asset, currentPos.plus(fillSize));
+                this.inventory.cashUSD = this.inventory.cashUSD.sub(costUSD).sub(fee);
+            }
+            else {
+                this.inventory.positions.set(order.asset, currentPos.sub(fillSize));
+                this.inventory.cashUSD = this.inventory.cashUSD.plus(costUSD).sub(fee);
+            }
+        }
+        else if (event.type === 'order_cancel') {
+            this.activeOrders.delete(event.order_id);
+        }
     }
     async assertStateIntegrity() {
         if (this.stateInvalidated) {
@@ -122,28 +166,29 @@ class MicrostructureAnalyzer {
 // 3. INVENTORY MANAGEMENT (DELTA FLATTENING)
 // ==========================================
 class InventorySkewEngine {
-    maxDeltaUSD;
-    constructor(maxDeltaUSD) {
-        this.maxDeltaUSD = maxDeltaUSD;
+    maxDeltaUSDPerAsset;
+    constructor(maxDeltaUSDPerAsset) {
+        this.maxDeltaUSDPerAsset = maxDeltaUSDPerAsset;
     }
     calculateRequiredHedges(exposures) {
-        let netPortfolioDelta = new Decimal(0);
-        for (const exp of exposures) {
-            netPortfolioDelta = netPortfolioDelta.plus(exp.netDeltaUSD);
-        }
         const hedges = [];
-        // If portfolio accumulates unintended directional bias beyond limits
-        if (netPortfolioDelta.abs().gt(this.maxDeltaUSD)) {
-            const hedgeSize = netPortfolioDelta.abs().sub(this.maxDeltaUSD.mul('0.5')); // Flatten to 50% of limit
-            hedges.push({
-                id: `HEDGE-${Date.now()}`,
-                asset: 'ETH-PERP', // Proxy hedge
-                urgency: 1.0, // Risk-reducing orders take urgency 1 (Taker)
-                targetSizeUSD: hedgeSize,
-                direction: netPortfolioDelta.gt(0) ? 'sell' : 'buy',
-                isHedge: true
-            });
-            console.log(`[INVENTORY] Unintended skew detected (Delta: $${netPortfolioDelta.toFixed(2)}). Generated flattening hedge.`);
+        for (const exp of exposures) {
+            // Factor neutrality: flatten delta PER ASSET, not globally via proxy
+            if (exp.netDeltaUSD.abs().gt(this.maxDeltaUSDPerAsset)) {
+                // Flatten to 50% of the limit to avoid rebalance churn
+                const targetReduction = exp.netDeltaUSD.abs().sub(this.maxDeltaUSDPerAsset.mul('0.5'));
+                // Asset-matched hedge
+                const hedgeAsset = exp.asset.endsWith('-PERP') ? exp.asset : `${exp.asset}-PERP`;
+                hedges.push({
+                    id: `HEDGE-${exp.asset}-${Date.now()}`,
+                    asset: hedgeAsset,
+                    urgency: 1.0, // Risk-reducing orders take urgency 1 (Taker)
+                    targetSizeUSD: targetReduction,
+                    direction: exp.netDeltaUSD.gt(0) ? 'sell' : 'buy',
+                    isHedge: true
+                });
+                console.log(`[INVENTORY] Unintended skew on ${exp.asset} (Delta: $${exp.netDeltaUSD.toFixed(2)}). Generated flattening hedge.`);
+            }
         }
         return hedges;
     }
