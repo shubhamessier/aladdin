@@ -1,6 +1,7 @@
 import { PortfolioState } from '../portfolio/state.js';
 import type { RiskMetrics } from '../risk/engine.js';
 import type { ProposedAction } from '../blockchain/writer.js';
+import { Decimal } from 'decimal.js';
 
 export interface StrategyEvaluationInputs {
     portfolio: PortfolioState;
@@ -17,11 +18,11 @@ export class StrategyManager {
         if (regime === 'crisis') {
              actions.push({
                  type: 'STRATEGY_WITHDRAWAL',
-                 amountUSD: 0 
+                 amountUSD: new Decimal(0) 
              });
         }
 
-        if (riskMetrics.maxDrawdown > 0.15) {
+        if (riskMetrics.maxDrawdown.gt(0.15)) {
             // Scale back logic placeholder
         }
 

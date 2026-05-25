@@ -1,33 +1,34 @@
+import { Decimal } from 'decimal.js';
 import type { OnChainState } from '../blockchain/reader.js';
 export interface Position {
     asset: string;
     amount: bigint;
-    valueUSD: number;
+    valueUSD: Decimal;
 }
 export interface DerivativePosition {
     market: string;
     isLong: boolean;
-    sizeUSD: number;
-    margin: number;
-    unrealizedPnL: number;
+    sizeUSD: Decimal;
+    margin: Decimal;
+    unrealizedPnL: Decimal;
 }
 export interface AssetAllocationBounds {
-    maxBps: number;
-    minBps: number;
+    maxBps: Decimal;
+    minBps: Decimal;
 }
 export interface PortfolioLimits {
-    maxHHI: number;
-    minStableReserveBps: number;
+    maxHHI: Decimal;
+    minStableReserveBps: Decimal;
 }
 export declare class PortfolioState {
-    totalValueUSD: number;
-    totalStableValueUSD: number;
-    drawdownFromHWM: number;
+    totalValueUSD: Decimal;
+    totalStableValueUSD: Decimal;
+    drawdownFromHWM: Decimal;
     derivativePositions: DerivativePosition[];
     private positions;
     private bounds;
     static reconstruct(onChainState: OnChainState): PortfolioState;
-    getAllocations(): Record<string, number>;
+    getAllocations(): Record<string, Decimal>;
     getAllocationBounds(): Record<string, AssetAllocationBounds>;
     getTierLimits(): Record<string, unknown>;
 }

@@ -1,14 +1,16 @@
+import { Decimal } from 'decimal.js';
+
 export interface OptimizerConstraints {
     bounds: Record<string, any>;
     tierLimits: Record<string, any>;
-    maxHHI: number;
-    stableMinimum: number;
+    maxHHI: Decimal;
+    stableMinimum: Decimal;
 }
 
 export interface OptimizerInputs {
     method: string;
-    expectedReturns: number[];
-    covariance: number[][];
+    expectedReturns: Decimal[];
+    covariance: Decimal[][];
     constraints: OptimizerConstraints;
     views: any[];
 }
@@ -20,12 +22,16 @@ export class AllocationOptimizer {
         this.pythonApiUrl = pythonApiUrl;
     }
 
-    public async optimize(inputs: OptimizerInputs): Promise<Record<string, number>> {
+    public async optimize(inputs: OptimizerInputs): Promise<Record<string, Decimal>> {
         const payload = {
             method: inputs.method,
-            expectedReturns: inputs.expectedReturns,
-            covariance: inputs.covariance,
-            constraints: inputs.constraints,
+            expectedReturns: inputs.expectedReturns.map(r => r.toNumber()),
+            covariance: inputs.covariance.map(row => row.map(c => c.toNumber())),
+            constraints: {
+                ...inputs.constraints,
+                maxHHI: inputs.constraints.maxHHI.toNumber(),
+                stableMinimum: inputs.constraints.stableMinimum.toNumber(),
+            },
             views: inputs.views,
         };
 
@@ -46,7 +52,11 @@ export class AllocationOptimizer {
             }
 
             const data = await response.json() as { allocations: Record<string, number> };
-            return data.allocations;
+            const result: Record<string, Decimal> = {};
+            for (const [asset, weight] of Object.entries(data.allocations)) {
+                result[asset] = new Decimal(weight);
+            }
+            return result;
         } catch (error) {
             console.error('Optimizer API failed, returning empty allocations to avoid bad trades', error);
             return {};

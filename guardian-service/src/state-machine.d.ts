@@ -1,3 +1,4 @@
+import { Decimal } from 'decimal.js';
 export type GuardianState = 'INITIALIZING' | 'HEALTHY' | 'DEGRADED' | 'RESTRICTED' | 'EMERGENCY' | 'SHUTDOWN';
 export interface EvaluationInput {
     oracleHealth: 'GOOD' | 'DEGRADED' | 'SUSPECT' | 'STALE';
@@ -5,7 +6,7 @@ export interface EvaluationInput {
     protocolHealth: 'HEALTHY' | 'DEGRADED' | 'DOWN';
     stablecoinHealth: 'HEALTHY' | 'WATCH' | 'WARNING' | 'CRITICAL';
     circuitBreakerLevel: 0 | 1 | 2 | 3;
-    currentDrawdown: number;
+    currentDrawdown: Decimal;
 }
 export interface CBState {
     cbLevelSetTimestamp: number;
@@ -13,7 +14,7 @@ export interface CBState {
     currentCBLevel: number;
 }
 export interface HWMState {
-    hwmAbsolute: number;
+    hwmAbsolute: Decimal;
     hwmLastUpdatedTimestamp: number;
     hwmDecayHalflifeSeconds: number;
 }
@@ -22,7 +23,7 @@ export type GuardianAction = {
 } | {
     type: 'SET_RECOVERY_PHASE';
     active: boolean;
-    maxVolatileBps: number;
+    maxVolatileBps: Decimal;
 } | {
     type: 'NONE';
 };
@@ -30,7 +31,7 @@ export declare class StateMachine {
     private currentState;
     getCurrentState(): GuardianState;
     evaluate(input: EvaluationInput): GuardianState;
-    computeEffectiveHWM(state: HWMState, currentTimeSeconds: number): number;
+    computeEffectiveHWM(state: HWMState, currentTimeSeconds: number): Decimal;
     checkCBDecayConditions(cbState: CBState, currentTimeSeconds: number): boolean;
     processState(input: EvaluationInput, cbState: CBState, currentTimeSeconds: number): {
         newState: GuardianState;

@@ -1,3 +1,5 @@
+import { Decimal } from 'decimal.js';
+
 export type GuardianState =
     | 'INITIALIZING'
     | 'HEALTHY'
@@ -12,7 +14,7 @@ export interface EvaluationInput {
     protocolHealth: 'HEALTHY' | 'DEGRADED' | 'DOWN';
     stablecoinHealth: 'HEALTHY' | 'WATCH' | 'WARNING' | 'CRITICAL';
     circuitBreakerLevel: 0 | 1 | 2 | 3;
-    currentDrawdown: number;
+    currentDrawdown: Decimal;
 }
 
 export interface CBState {
@@ -22,14 +24,14 @@ export interface CBState {
 }
 
 export interface HWMState {
-    hwmAbsolute: number;
+    hwmAbsolute: Decimal;
     hwmLastUpdatedTimestamp: number;
     hwmDecayHalflifeSeconds: number;
 }
 
 export type GuardianAction = 
     | { type: 'DECAY_CB_LEVEL' }
-    | { type: 'SET_RECOVERY_PHASE'; active: boolean; maxVolatileBps: number }
+    | { type: 'SET_RECOVERY_PHASE'; active: boolean; maxVolatileBps: Decimal }
     | { type: 'NONE' };
 
 export class StateMachine {
@@ -44,7 +46,7 @@ export class StateMachine {
             return 'EMERGENCY';
         }
 
-        if (input.circuitBreakerLevel >= 1 || input.oracleHealth === 'SUSPECT' || input.currentDrawdown > 0.15 || input.stablecoinHealth === 'WARNING') {
+        if (input.circuitBreakerLevel >= 1 || input.oracleHealth === 'SUSPECT' || input.currentDrawdown.gt(0.15) || input.stablecoinHealth === 'WARNING') {
             return 'RESTRICTED';
         }
 
@@ -55,22 +57,23 @@ export class StateMachine {
         return 'HEALTHY';
     }
 
-    public computeEffectiveHWM(state: HWMState, currentTimeSeconds: number): number {
-        if (state.hwmAbsolute === 0) return 0;
+    public computeEffectiveHWM(state: HWMState, currentTimeSeconds: number): Decimal {
+        if (state.hwmAbsolute.isZero()) return new Decimal(0);
         const elapsed = currentTimeSeconds - state.hwmLastUpdatedTimestamp;
         if (elapsed <= 0) return state.hwmAbsolute;
         
         const halflives = Math.floor(elapsed / state.hwmDecayHalflifeSeconds);
-        if (halflives >= 64) return 0;
+        if (halflives >= 64) return new Decimal(0);
         
-        let decayedValue = state.hwmAbsolute / Math.pow(2, halflives);
+        let decayedValue = state.hwmAbsolute.div(new Decimal(2).pow(halflives));
         
         const remainder = elapsed % state.hwmDecayHalflifeSeconds;
         if (remainder > 0) {
-            decayedValue = decayedValue - (decayedValue * remainder) / (2 * state.hwmDecayHalflifeSeconds);
+            const decayFactor = new Decimal(remainder).div(new Decimal(2).mul(state.hwmDecayHalflifeSeconds));
+            decayedValue = decayedValue.sub(decayedValue.mul(decayFactor));
         }
         
-        return Math.floor(decayedValue);
+        return decayedValue.floor();
     }
 
     public checkCBDecayConditions(cbState: CBState, currentTimeSeconds: number): boolean {
@@ -95,11 +98,11 @@ export class StateMachine {
 
         if (newState === 'RESTRICTED' || newState === 'EMERGENCY') {
             if (this.currentState !== 'RESTRICTED' && this.currentState !== 'EMERGENCY') {
-                actions.push({ type: 'SET_RECOVERY_PHASE', active: true, maxVolatileBps: 2000 }); // e.g. cap at 20%
+                actions.push({ type: 'SET_RECOVERY_PHASE', active: true, maxVolatileBps: new Decimal(2000) }); // e.g. cap at 20%
             }
         } else if (newState === 'HEALTHY' || newState === 'DEGRADED') {
             if (this.currentState === 'RESTRICTED' || this.currentState === 'EMERGENCY') {
-                actions.push({ type: 'SET_RECOVERY_PHASE', active: false, maxVolatileBps: 0 });
+                actions.push({ type: 'SET_RECOVERY_PHASE', active: false, maxVolatileBps: new Decimal(0) });
             }
         }
 

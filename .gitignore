@@ -36,3 +36,9 @@ lib/
 
 # Logs
 *.log
+
+# Guardian Service Build Artifacts
+guardian-service/src/**/*.js
+guardian-service/src/**/*.d.ts
+guardian-service/src/**/*.map
+guardian-service/dist/

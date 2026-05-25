@@ -1,3 +1,4 @@
+import { Decimal } from 'decimal.js';
 import { type TransactionReceipt } from './ethers-types.js';
 export interface ExecutionResult {
     success: boolean;
@@ -7,7 +8,7 @@ export interface ExecutionResult {
 }
 export interface ProposedAction {
     type: string;
-    amountUSD: number;
+    amountUSD: Decimal;
     target?: string;
     callData?: string;
     value?: bigint;
