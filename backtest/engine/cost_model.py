@@ -9,8 +9,11 @@ class TradeCost:
     permanent_impact_cost: float
     gas_cost: float
     mev_cost: float
+    latency_cost: float
+    toxicity_cost: float
     total: float
     total_bps: float
+    fill_ratio: float
 
 class CostModelConfig(BaseModel):
     # Hyperliquid blended fee (Maker 0.2bp, Taker 2.5bp -> 70/30 split ≈ 0.9bp)
@@ -30,6 +33,9 @@ class CostModelConfig(BaseModel):
     mev_threshold_usd: float = 1000000.0 # No MEV on Hyperliquid sequencer
     mev_cost_bps: float = 0.0
     twap_threshold_usd: float = 250000.0
+    base_latency_ms: float = 150.0
+    latency_penalty_bps_per_100ms: float = 1.5
+    toxicity_alpha: float = 0.15 # 15% probability of toxic fill taking 5bps
 
 class TransactionCostModel:
     def __init__(self, config: CostModelConfig):
@@ -45,7 +51,7 @@ class TransactionCostModel:
         asset_volatility: float = 0.03
     ) -> TradeCost:
         if trade_size_usd <= 0:
-            return TradeCost(0,0,0,0,0,0,0)
+            return TradeCost(0,0,0,0,0,0,0,0,0,1.0)
             
         dex_fee = trade_size_usd * self.config.dex_fee_bps / 10000
         
@@ -54,20 +60,38 @@ class TransactionCostModel:
         # Scaled by size: $1M trade has 10x impact of $100k? No, depth is non-linear.
         # Approximation: slippage_bps = base_bps * (size / 100k) ^ 0.7
         size_factor = (trade_size_usd / 100000.0) ** 0.7
-        impact_bps = base_slippage * size_factor
+        
+        # Volatility multiplier: Slippage explodes during high volatility
+        vol_multiplier = max(1.0, asset_volatility / 0.03)
+        impact_bps = base_slippage * size_factor * vol_multiplier
         impact_cost = trade_size_usd * (impact_bps / 10000)
         
         permanent_cost = 0.0 # Minimal info leakage on large CLOB
         gas_cost = self.config.gas_cost_per_trade_usd
         mev_cost = 0.0
         
-        total = dex_fee + impact_cost + permanent_cost + gas_cost + mev_cost
+        # Microstructure Additions (Latency & Toxicity)
+        latency_cost = trade_size_usd * (self.config.base_latency_ms / 100.0) * (self.config.latency_penalty_bps_per_100ms / 10000.0)
+        
+        # Toxic fill: adverse selection probability increases with volatility
+        prob_toxic = min(0.9, self.config.toxicity_alpha * vol_multiplier)
+        toxicity_cost = trade_size_usd * prob_toxic * (5.0 / 10000.0) # Assume 5bps hit on toxic fills
+        
+        # Partial Fill modeling: High volatility or large trade size reduces fill ratio
+        fill_ratio = 1.0
+        if trade_size_usd > 500000.0 and asset_volatility > 0.05:
+            fill_ratio = max(0.2, 1.0 - (asset_volatility * 2.0))
+            
+        total = dex_fee + impact_cost + permanent_cost + gas_cost + mev_cost + latency_cost + toxicity_cost
         return TradeCost(
             dex_fee=dex_fee,
             impact_cost=impact_cost,
             permanent_impact_cost=permanent_cost,
             gas_cost=gas_cost,
             mev_cost=mev_cost,
+            latency_cost=latency_cost,
+            toxicity_cost=toxicity_cost,
             total=total,
-            total_bps=total / trade_size_usd * 10000 if trade_size_usd > 0 else 0
+            total_bps=total / trade_size_usd * 10000 if trade_size_usd > 0 else 0,
+            fill_ratio=fill_ratio
         )

@@ -189,8 +189,14 @@ class TreasurySimulator:
                 # Estimate cost per asset (Flaw-04 fix in TCM)
                 trade_size = abs(new_target_val - old_val)
                 trade_vol += trade_size
-                cost = self.cost_model.estimate_cost(trade_size, asset, "buy", 1e8, 1e7).total
-                self.portfolio.portfolio_value -= cost
+                
+                cost = self.cost_model.estimate_cost(trade_size, asset, "buy", 1e8, 1e7)
+                self.portfolio.portfolio_value -= cost.total
+                
+                # Apply partial fills (Microstructure realism)
+                actual_trade_size = trade_size * cost.fill_ratio
+                new_target_val = old_val + (actual_trade_size if new_target_val > old_val else -actual_trade_size)
+                target_weights[asset] = new_target_val / self.portfolio.portfolio_value if self.portfolio.portfolio_value > 0 else 0.0
             
             self.portfolio.cash = self.portfolio.portfolio_value * (1.0 - sum(target_weights.values()))
             
