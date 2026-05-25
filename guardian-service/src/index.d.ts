@@ -1,8 +1,30 @@
+import { Decimal } from 'decimal.js';
 export declare class TransientError extends Error {
-    constructor(message: string);
+    readonly context: string;
+    constructor(context: string, message: string);
 }
 export declare class FatalStateError extends Error {
+    readonly context: string;
+    constructor(context: string, message: string);
+}
+export declare class RateLimitError extends Error {
     constructor(message: string);
 }
-export declare function guardianCycle(): Promise<void>;
+interface PortfolioExposure {
+    asset: string;
+    netDeltaUSD: Decimal;
+    maintenanceMarginUSD: Decimal;
+    unrealizedPnL: Decimal;
+    cumulativeFundingUSD: Decimal;
+}
+interface MarketState {
+    bid: Decimal;
+    ask: Decimal;
+    bidDepth: Decimal;
+    askDepth: Decimal;
+    vpin: Decimal;
+    fundingRate8H: Decimal;
+}
+export declare function guardianTick(marketState: MarketState, exposures: PortfolioExposure[]): Promise<void>;
+export {};
 //# sourceMappingURL=index.d.ts.map

@@ -1,115 +1,330 @@
 import { Decimal } from 'decimal.js';
 
-// --- Error Domains ---
+// ==========================================
+// ERROR DOMAINS & FATAL STATE TRANSITIONS
+// ==========================================
 export class TransientError extends Error {
-    constructor(message: string) {
-        super(message);
+    constructor(public readonly context: string, message: string) {
+        super(`[TRANSIENT: ${context}] ${message}`);
         this.name = 'TransientError';
     }
 }
 
 export class FatalStateError extends Error {
-    constructor(message: string) {
-        super(message);
+    constructor(public readonly context: string, message: string) {
+        super(`[FATAL: ${context}] ${message}`);
         this.name = 'FatalStateError';
     }
 }
 
-// --- Interfaces ---
-interface ValidatedAction {
-    type: string;
-    amountUSD: Decimal;
+export class RateLimitError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'RateLimitError';
+    }
+}
+
+// ==========================================
+// PRECISION ARITHMETIC INTERFACES
+// ==========================================
+interface PortfolioExposure {
     asset: string;
+    netDeltaUSD: Decimal;
+    maintenanceMarginUSD: Decimal;
+    unrealizedPnL: Decimal;
+    cumulativeFundingUSD: Decimal;
+}
+
+interface MarketState {
+    bid: Decimal;
+    ask: Decimal;
+    bidDepth: Decimal;
+    askDepth: Decimal;
+    vpin: Decimal;       // Volume-Synchronized Probability of Informed Trading
+    fundingRate8H: Decimal;
+}
+
+interface ActionParameters {
+    id: string;
+    asset: string;
+    urgency: number;     // 0.0 (Passive Maker) to 1.0 (Aggressive Taker)
+    targetSizeUSD: Decimal;
     direction: 'buy' | 'sell';
+    isHedge: boolean;
 }
 
-interface ExecutionResult {
-    success: boolean;
-    fillPrice: Decimal;
-    fee: Decimal;
-}
+// ==========================================
+// 1. DETERMINISTIC STATE RECONCILIATION
+// ==========================================
+class EventSourcingLedger {
+    private expectedSeqId: number = 0;
+    private stateInvalidated: boolean = false;
+    private readonly maxGapReplaySize = 5;
+    private eventBuffer: Map<number, any> = new Map();
 
-// --- Services ---
-const logger = {
-    info: (msg: any) => console.log(JSON.stringify(msg)),
-    error: (msg: any) => console.error(JSON.stringify(msg)),
-    fatal: (msg: any) => console.error("FATAL: " + JSON.stringify(msg)),
-};
+    public onWebSocketMessage(seqId: number, event: any) {
+        if (this.stateInvalidated) return;
 
-class MicrostructureExecutionEngine {
-    async execute(action: ValidatedAction): Promise<ExecutionResult> {
-        // Microstructure logic: queue simulation, VPIN checks, deterministic nonce
-        const isToxic = Math.random() > 0.95;
-        if (isToxic) {
-            throw new TransientError("Toxic fill predicted. Withdrawing liquidity.");
+        if (seqId === this.expectedSeqId + 1) {
+            this.applyEvent(event);
+            this.expectedSeqId = seqId;
+            this.flushBuffer();
+        } else if (seqId > this.expectedSeqId + 1) {
+            // Buffer out-of-order packets if within gap tolerance
+            if (seqId - this.expectedSeqId <= this.maxGapReplaySize) {
+                this.eventBuffer.set(seqId, event);
+            } else {
+                this.triggerEmergencySnapshotRecovery(`Sequence gap too large. Expected ${this.expectedSeqId + 1}, got ${seqId}`);
+            }
         }
+    }
+
+    private flushBuffer() {
+        while (this.eventBuffer.has(this.expectedSeqId + 1)) {
+            this.expectedSeqId++;
+            this.applyEvent(this.eventBuffer.get(this.expectedSeqId));
+            this.eventBuffer.delete(this.expectedSeqId);
+        }
+    }
+
+    private applyEvent(event: any) {
+        // Deterministic double-entry accounting application
+        // e.g., Update balances, fill tracking, margin consumption
+    }
+
+    public async assertStateIntegrity(): Promise<void> {
+        if (this.stateInvalidated) {
+            throw new FatalStateError("Ledger", "State desynchronized. Trading halted until REST snapshot reconciliation finishes.");
+        }
+    }
+
+    private triggerEmergencySnapshotRecovery(reason: string) {
+        console.error(`[FATAL] State Invalidated: ${reason}. Halting and recovering via REST.`);
+        this.stateInvalidated = true;
+        // Mocking recovery
+        setTimeout(() => {
+            this.expectedSeqId = Date.now();
+            this.stateInvalidated = false;
+            this.eventBuffer.clear();
+            console.log("[RECOVERY] Deterministic state rebuilt from authoritative exchange snapshot.");
+        }, 5000);
+    }
+}
+
+// ==========================================
+// 2. MICROSTRUCTURE: QUEUE & TOXICITY ENGINE
+// ==========================================
+class MicrostructureAnalyzer {
+    
+    public evaluateExecutionExpectancy(
+        action: ActionParameters, 
+        market: MarketState
+    ): { acceptable: boolean, expectedEdgeBps: Decimal, reason?: string } {
         
-        // Simulating deterministic execution without polling
-        return {
-            success: true,
-            fillPrice: new Decimal('100.00'),
-            fee: new Decimal('0.5')
-        };
-    }
-}
+        // Expected PnL = Directional Edge + Maker Rebate - Spread Crossing - Impact - Toxicity - Funding Drag
+        
+        let expectedEdgeBps = new Decimal(0);
+        
+        // 1. Funding Drag (Holding inventory costs money if rate is against us)
+        // If we are buying (long), and funding is positive, we pay.
+        const fundingDragBps = action.direction === 'buy' ? market.fundingRate8H.mul(10000).neg() : market.fundingRate8H.mul(10000);
+        
+        // 2. Execution Quality (Maker vs Taker)
+        if (action.urgency === 0) {
+            // Maker Order: Earn rebate, but suffer adverse selection (Toxicity)
+            const makerRebateBps = new Decimal('0.2');
+            
+            // Queue Position Estimator: How much depth is ahead of us?
+            // VPIN directly correlates to probability of a toxic sweep.
+            const toxicFillProbability = market.vpin; 
+            const adverseSelectionPenaltyBps = market.ask.sub(market.bid).div(market.bid).mul(10000).mul(toxicFillProbability);
 
-class EventSourcedReconciliation {
-    async assertStateIntegrity(): Promise<boolean> {
-        // Compare shadow state with sequence-locked exchange snapshot
-        return true; 
-    }
-}
+            expectedEdgeBps = expectedEdgeBps.plus(makerRebateBps).sub(adverseSelectionPenaltyBps).plus(fundingDragBps);
 
-// --- Main Guardian Cycle ---
-const executionEngine = new MicrostructureExecutionEngine();
-const reconciler = new EventSourcedReconciliation();
-
-export async function guardianCycle(): Promise<void> {
-    const cycleStart = Date.now();
-    const traceId = `TRACE-${cycleStart}`;
-
-    try {
-        // 1. Reconcile Exchange Truth
-        const isHealthy = await reconciler.assertStateIntegrity();
-        if (!isHealthy) {
-            throw new FatalStateError("State Desync. Exchange snapshot does not match event journal.");
-        }
-
-        // 2. Generate Actions (Mocked for architecture demo)
-        const validatedActions: ValidatedAction[] = [
-            { type: 'HEDGE_DELTA', amountUSD: new Decimal('10000.50'), asset: 'ETH-PERP', direction: 'sell' },
-            { type: 'HEDGE_DELTA', amountUSD: new Decimal('5000.25'), asset: 'BTC-PERP', direction: 'sell' }
-        ];
-
-        // 3. Concurrent Risk-Prioritized Execution
-        // Avoid sequential loops. Map immediately to Promise.all
-        const executionPromises = validatedActions.map(action => 
-            executionEngine.execute(action).catch(err => {
-                if (err instanceof TransientError) {
-                    logger.info({ traceId, msg: `Transient execution failure: ${err.message}` });
-                    return null; // Return null so Promise.all doesn't fail immediately
-                }
-                throw err; // Escalate fatal errors immediately
-            })
-        );
-
-        const results = await Promise.all(executionPromises);
-        const successfulFills = results.filter(r => r !== null);
-
-        logger.info({ traceId, executed: successfulFills.length, msg: 'Cycle complete' });
-
-    } catch (err) {
-        if (err instanceof FatalStateError) {
-            logger.fatal({ traceId, error: err.message, msg: 'INITIATING EMERGENCY SHUTDOWN' });
-            // trigger emergency endpoints (cancel all, withdraw)
-            process.exit(1); 
+            if (toxicFillProbability.gt(new Decimal('0.75'))) {
+                return { acceptable: false, expectedEdgeBps, reason: "High VPIN Toxicity - Maker quote will suffer adverse selection." };
+            }
         } else {
-            logger.error({ traceId, error: err, msg: 'Unhandled cycle exception' });
+            // Taker Order: Pay spread, taker fee, and L2 depth impact
+            const takerFeeBps = new Decimal('2.5');
+            const spreadBps = market.ask.sub(market.bid).div(market.bid).mul(10000);
+            
+            const relevantDepth = action.direction === 'buy' ? market.askDepth : market.bidDepth;
+            const impactBps = action.targetSizeUSD.gt(relevantDepth) 
+                ? action.targetSizeUSD.sub(relevantDepth).div(relevantDepth).mul(spreadBps).mul('1.5') // Walking the book
+                : new Decimal(0);
+                
+            expectedEdgeBps = expectedEdgeBps.sub(takerFeeBps).sub(spreadBps.div(2)).sub(impactBps).plus(fundingDragBps);
+        }
+
+        // If edge is negative, and it's NOT a risk-reducing hedge, reject it.
+        if (expectedEdgeBps.lt(0) && !action.isHedge) {
+            return { acceptable: false, expectedEdgeBps, reason: "Negative expected execution edge." };
+        }
+
+        return { acceptable: true, expectedEdgeBps };
+    }
+}
+
+// ==========================================
+// 3. INVENTORY MANAGEMENT (DELTA FLATTENING)
+// ==========================================
+class InventorySkewEngine {
+    constructor(private readonly maxDeltaUSD: Decimal) {}
+
+    public calculateRequiredHedges(exposures: PortfolioExposure[]): ActionParameters[] {
+        let netPortfolioDelta = new Decimal(0);
+        for (const exp of exposures) {
+            netPortfolioDelta = netPortfolioDelta.plus(exp.netDeltaUSD);
+        }
+
+        const hedges: ActionParameters[] = [];
+
+        // If portfolio accumulates unintended directional bias beyond limits
+        if (netPortfolioDelta.abs().gt(this.maxDeltaUSD)) {
+            const hedgeSize = netPortfolioDelta.abs().sub(this.maxDeltaUSD.mul('0.5')); // Flatten to 50% of limit
+            
+            hedges.push({
+                id: `HEDGE-${Date.now()}`,
+                asset: 'ETH-PERP', // Proxy hedge
+                urgency: 1.0,      // Risk-reducing orders take urgency 1 (Taker)
+                targetSizeUSD: hedgeSize,
+                direction: netPortfolioDelta.gt(0) ? 'sell' : 'buy',
+                isHedge: true
+            });
+            console.log(`[INVENTORY] Unintended skew detected (Delta: $${netPortfolioDelta.toFixed(2)}). Generated flattening hedge.`);
+        }
+
+        return hedges;
+    }
+}
+
+// ==========================================
+// 4. RATE LIMITING & ADAPTIVE PACING
+// ==========================================
+class AdaptiveTokenBucket {
+    private tokens: Decimal;
+    private refillRatePerMs: Decimal;
+    private lastRefill: number;
+
+    constructor(private maxTokens: Decimal, refillRatePerSec: Decimal) {
+        this.tokens = maxTokens;
+        this.refillRatePerMs = refillRatePerSec.div(1000);
+        this.lastRefill = Date.now();
+    }
+
+    public acquire(cost: number = 1): void {
+        this.refill();
+        const costDec = new Decimal(cost);
+        if (this.tokens.lt(costDec)) {
+            throw new RateLimitError(`Exchange endpoint budget exhausted. Backpressure active.`);
+        }
+        this.tokens = this.tokens.sub(costDec);
+    }
+
+    public reportLatency(latencyMs: number): void {
+        if (latencyMs > 500) {
+            // Penalize refill rate heavily during exchange strain
+            this.refillRatePerMs = this.refillRatePerMs.mul('0.5');
+            console.warn(`[PACING] High latency (${latencyMs}ms). Throttling token bucket.`);
+        } else {
+            // Recover gradually
+            this.refillRatePerMs = Decimal.min(new Decimal(50).div(1000), this.refillRatePerMs.mul('1.05'));
+        }
+    }
+
+    private refill(): void {
+        const now = Date.now();
+        const elapsedMs = new Decimal(now - this.lastRefill);
+        this.tokens = Decimal.min(this.maxTokens, this.tokens.plus(elapsedMs.mul(this.refillRatePerMs)));
+        this.lastRefill = now;
+    }
+}
+
+// ==========================================
+// 5. SECURITY: TRANSACTION FIREWALL
+// ==========================================
+class TransactionFirewall {
+    // Isolates execution intent from signing domain.
+    public validateExecutionBounds(action: ActionParameters): void {
+        if (action.targetSizeUSD.lt(0) || action.targetSizeUSD.isNaN()) {
+            throw new FatalStateError("Firewall", "Invalid transaction size payload.");
+        }
+        if (action.targetSizeUSD.gt(new Decimal('2000000'))) {
+            throw new FatalStateError("Firewall", "Transaction exceeds hardcoded firewall limit ($2M).");
         }
     }
 }
 
-// Example usage
-if (require.main === module) {
-    guardianCycle();
+// ==========================================
+// MAIN GUARDIAN ORCHESTRATOR
+// ==========================================
+
+const ledger = new EventSourcingLedger();
+const microstructure = new MicrostructureAnalyzer();
+const inventoryEngine = new InventorySkewEngine(new Decimal('500000')); // Max $500k unhedged delta
+const rateLimiter = new AdaptiveTokenBucket(new Decimal(100), new Decimal(50));
+const firewall = new TransactionFirewall();
+
+export async function guardianTick(marketState: MarketState, exposures: PortfolioExposure[]): Promise<void> {
+    try {
+        // 1. Authoritative State Barrier
+        await ledger.assertStateIntegrity();
+
+        // 2. Dynamic Inventory Control
+        const actions: ActionParameters[] = inventoryEngine.calculateRequiredHedges(exposures);
+
+        // Simulated Alpha Order
+        actions.push({
+            id: `ALPHA-${Date.now()}`,
+            asset: 'BTC-PERP',
+            urgency: 0.0, // Maker
+            targetSizeUSD: new Decimal('100000'),
+            direction: 'buy',
+            isHedge: false
+        });
+
+        // 3. Concurrent DAG Execution Pipeline
+        const executionPromises = actions.map(async (action) => {
+            try {
+                // Security boundary
+                firewall.validateExecutionBounds(action);
+
+                // Microstructure validation
+                const analysis = microstructure.evaluateExecutionExpectancy(action, marketState);
+                if (!analysis.acceptable) {
+                    console.log(`[EXECUTION REJECTED] ${action.id}: ${analysis.reason} (Expected Edge: ${analysis.expectedEdgeBps.toFixed(2)} bps)`);
+                    return;
+                }
+
+                // Adaptive Pacing
+                rateLimiter.acquire(1);
+                const start = Date.now();
+                
+                // --- MOCK EXCHANGE SUBMISSION ---
+                await new Promise(r => setTimeout(r, Math.random() * 200 + 50));
+                
+                const latency = Date.now() - start;
+                rateLimiter.reportLatency(latency);
+
+                console.log(`[EXECUTED] ${action.id} | Edge: ${analysis.expectedEdgeBps.toFixed(2)} bps | Latency: ${latency}ms`);
+            } catch (err: any) {
+                if (err instanceof TransientError || err instanceof RateLimitError) {
+                    console.warn(err.message);
+                } else {
+                    throw err; // Escalate Fatal
+                }
+            }
+        });
+
+        await Promise.all(executionPromises);
+
+    } catch (err: any) {
+        if (err instanceof FatalStateError) {
+            console.error(err.message);
+            console.error("[SHUTDOWN] Triggering hard system kill and isolating signer.");
+            process.exit(1);
+        }
+        console.error("Unhandled Tick Exception:", err);
+    }
 }

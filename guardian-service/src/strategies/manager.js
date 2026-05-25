@@ -1,4 +1,5 @@
 import { PortfolioState } from '../portfolio/state.js';
+import { Decimal } from 'decimal.js';
 export class StrategyManager {
     async evaluateAndRebalance(inputs) {
         const actions = [];
@@ -6,10 +7,10 @@ export class StrategyManager {
         if (regime === 'crisis') {
             actions.push({
                 type: 'STRATEGY_WITHDRAWAL',
-                amountUSD: 0
+                amountUSD: new Decimal(0)
             });
         }
-        if (riskMetrics.maxDrawdown > 0.15) {
+        if (riskMetrics.maxDrawdown.gt(0.15)) {
             // Scale back logic placeholder
         }
         return actions;

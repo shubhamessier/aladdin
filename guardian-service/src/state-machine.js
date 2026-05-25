@@ -1,3 +1,4 @@
+import { Decimal } from 'decimal.js';
 export class StateMachine {
     currentState = 'INITIALIZING';
     getCurrentState() {
@@ -7,7 +8,7 @@ export class StateMachine {
         if (input.circuitBreakerLevel >= 3 || input.oracleHealth === 'STALE' || input.protocolHealth === 'DOWN' || input.stablecoinHealth === 'CRITICAL') {
             return 'EMERGENCY';
         }
-        if (input.circuitBreakerLevel >= 1 || input.oracleHealth === 'SUSPECT' || input.currentDrawdown > 0.15 || input.stablecoinHealth === 'WARNING') {
+        if (input.circuitBreakerLevel >= 1 || input.oracleHealth === 'SUSPECT' || input.currentDrawdown.gt(0.15) || input.stablecoinHealth === 'WARNING') {
             return 'RESTRICTED';
         }
         if (input.oracleHealth === 'DEGRADED' || input.protocolHealth === 'DEGRADED' || input.gasPrice > 100000000000n) { // Example high gas
@@ -16,20 +17,21 @@ export class StateMachine {
         return 'HEALTHY';
     }
     computeEffectiveHWM(state, currentTimeSeconds) {
-        if (state.hwmAbsolute === 0)
-            return 0;
+        if (state.hwmAbsolute.isZero())
+            return new Decimal(0);
         const elapsed = currentTimeSeconds - state.hwmLastUpdatedTimestamp;
         if (elapsed <= 0)
             return state.hwmAbsolute;
         const halflives = Math.floor(elapsed / state.hwmDecayHalflifeSeconds);
         if (halflives >= 64)
-            return 0;
-        let decayedValue = state.hwmAbsolute / Math.pow(2, halflives);
+            return new Decimal(0);
+        let decayedValue = state.hwmAbsolute.div(new Decimal(2).pow(halflives));
         const remainder = elapsed % state.hwmDecayHalflifeSeconds;
         if (remainder > 0) {
-            decayedValue = decayedValue - (decayedValue * remainder) / (2 * state.hwmDecayHalflifeSeconds);
+            const decayFactor = new Decimal(remainder).div(new Decimal(2).mul(state.hwmDecayHalflifeSeconds));
+            decayedValue = decayedValue.sub(decayedValue.mul(decayFactor));
         }
-        return Math.floor(decayedValue);
+        return decayedValue.floor();
     }
     checkCBDecayConditions(cbState, currentTimeSeconds) {
         if (cbState.currentCBLevel === 0)
@@ -49,12 +51,12 @@ export class StateMachine {
         }
         if (newState === 'RESTRICTED' || newState === 'EMERGENCY') {
             if (this.currentState !== 'RESTRICTED' && this.currentState !== 'EMERGENCY') {
-                actions.push({ type: 'SET_RECOVERY_PHASE', active: true, maxVolatileBps: 2000 }); // e.g. cap at 20%
+                actions.push({ type: 'SET_RECOVERY_PHASE', active: true, maxVolatileBps: new Decimal(2000) }); // e.g. cap at 20%
             }
         }
         else if (newState === 'HEALTHY' || newState === 'DEGRADED') {
             if (this.currentState === 'RESTRICTED' || this.currentState === 'EMERGENCY') {
-                actions.push({ type: 'SET_RECOVERY_PHASE', active: false, maxVolatileBps: 0 });
+                actions.push({ type: 'SET_RECOVERY_PHASE', active: false, maxVolatileBps: new Decimal(0) });
             }
         }
         return { newState, actions };

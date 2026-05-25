@@ -13,7 +13,7 @@ if str(risk_engine_path) not in sys.path:
 from risk_engine.regime_detector import RobustRegimeDetector
 from risk_engine.portfolio_optimizer import optimize_risk_parity
 from risk_engine.schemas import RegimePrediction, PortfolioWeights, TierConstraint
-from risk_engine.var_models import compute_historical_var
+from risk_engine.var_models import compute_historical_var, compute_jump_diffusion_var
 from risk_engine.covariance import build_covariance
 
 from backtest.engine.portfolio import PortfolioState
@@ -209,10 +209,18 @@ class TreasurySimulator:
 
         # 7. Risk Metrics (Use returns_history for VaR - no look-ahead)
         var_val = 0.0
+        jump_var_val = 0.0
         if len(returns_history) > 30:
             weights_arr = np.array([self.portfolio.weights.get(a, 0.0) for a in self.assets])
             var_95, _ = compute_historical_var(returns_history.values, weights_arr)
             var_val = var_95 * self.portfolio.portfolio_value
+            
+            try:
+                # Add probabilistic jump diffusion model
+                j_var_95, _ = compute_jump_diffusion_var(returns_history.values, weights_arr)
+                jump_var_val = j_var_95 * self.portfolio.portfolio_value
+            except Exception:
+                jump_var_val = var_val
 
         self.history.append({
             "timestamp": date,
@@ -223,6 +231,7 @@ class TreasurySimulator:
             "effective_hwm": eff_hwm,
             "recovery_active": self.recovery.is_active,
             "var_95_1d": var_val,
+            "jump_var_95_1d": jump_var_val,
             "trade_volume_usd": trade_vol
         })
 

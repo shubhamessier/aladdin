@@ -81,3 +81,46 @@ def compute_monte_carlo_var(
     cvar = -np.mean(port_returns[port_returns <= -var])
     
     return float(var), float(cvar)
+
+def compute_jump_diffusion_var(
+    returns: np.ndarray,
+    weights: np.ndarray,
+    confidence_level: float = 0.95,
+    jump_intensity: float = 20.0, # Expected jumps per year
+    jump_mean: float = -0.02,     # Average jump size (-2%)
+    jump_std: float = 0.05,       # Jump volatility
+    num_simulations: int = 50000
+) -> Tuple[float, float]:
+    """
+    Compute VaR using a Merton Jump-Diffusion model to explicitly price tail risk.
+    Unlike standard Monte Carlo, this models the sudden, non-continuous liquidations
+    common in crypto markets.
+    """
+    port_returns = np.dot(returns, weights)
+    
+    # Historical baseline parameters
+    dt = 1.0 / 252.0
+    mu = np.mean(port_returns) * 252.0
+    sigma = np.std(port_returns) * np.sqrt(252.0)
+    
+    # Simulate diffusion component (Geometric Brownian Motion)
+    z = np.random.normal(0, 1, num_simulations)
+    diffusion = (mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * z
+    
+    # Simulate jump component (Poisson process)
+    # Number of jumps in dt
+    n_jumps = np.random.poisson(jump_intensity * dt, num_simulations)
+    
+    # Jump sizes (log-normal approximation via normal sum)
+    jump_sizes = np.zeros(num_simulations)
+    for i in range(num_simulations):
+        if n_jumps[i] > 0:
+            jump_sizes[i] = np.sum(np.random.normal(jump_mean, jump_std, n_jumps[i]))
+            
+    sim_returns = diffusion + jump_sizes
+    
+    percentile = 1.0 - confidence_level
+    var = -np.percentile(sim_returns, percentile * 100)
+    cvar = -np.mean(sim_returns[sim_returns <= -var])
+    
+    return float(var), float(cvar)

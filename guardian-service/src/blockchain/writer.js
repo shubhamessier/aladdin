@@ -1,3 +1,4 @@
+import { Decimal } from 'decimal.js';
 import { provider, signer } from './ethers-types.js';
 export class TransactionSimulationError extends Error {
     description;

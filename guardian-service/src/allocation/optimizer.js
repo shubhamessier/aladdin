@@ -1,3 +1,4 @@
+import { Decimal } from 'decimal.js';
 export class AllocationOptimizer {
     pythonApiUrl;
     constructor(pythonApiUrl = 'http://localhost:8000') {
@@ -6,9 +7,13 @@ export class AllocationOptimizer {
     async optimize(inputs) {
         const payload = {
             method: inputs.method,
-            expectedReturns: inputs.expectedReturns,
-            covariance: inputs.covariance,
-            constraints: inputs.constraints,
+            expectedReturns: inputs.expectedReturns.map(r => r.toNumber()),
+            covariance: inputs.covariance.map(row => row.map(c => c.toNumber())),
+            constraints: {
+                ...inputs.constraints,
+                maxHHI: inputs.constraints.maxHHI.toNumber(),
+                stableMinimum: inputs.constraints.stableMinimum.toNumber(),
+            },
             views: inputs.views,
         };
         try {
@@ -28,7 +33,11 @@ export class AllocationOptimizer {
                 throw new Error(`Optimization failed: ${response.statusText}`);
             }
             const data = await response.json();
-            return data.allocations;
+            const result = {};
+            for (const [asset, weight] of Object.entries(data.allocations)) {
+                result[asset] = new Decimal(weight);
+            }
+            return result;
         }
         catch (error) {
             console.error('Optimizer API failed, returning empty allocations to avoid bad trades', error);

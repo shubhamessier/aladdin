@@ -1,3 +1,4 @@
+import { Decimal } from 'decimal.js';
 import { PortfolioState } from '../portfolio/state.js';
 import { VaRCalculator } from './var.js';
 export class RiskEngine {
@@ -9,14 +10,15 @@ export class RiskEngine {
         const { portfolio, prices, regime, covariance } = inputs;
         const varMetrics = await this.varCalculator.computeVaR(portfolio, prices);
         const allocations = portfolio.getAllocations();
-        let hhi = 0;
+        let hhi = new Decimal(0);
         for (const w of Object.values(allocations)) {
-            hhi += (w * 10000) * (w * 10000);
+            const wBps = w.mul(10000);
+            hhi = hhi.add(wBps.mul(wBps));
         }
-        hhi = hhi / 10000;
-        let netDelta = 0;
+        hhi = hhi.div(10000);
+        let netDelta = new Decimal(0);
         for (const pos of portfolio.derivativePositions) {
-            netDelta += pos.isLong ? pos.sizeUSD : -pos.sizeUSD;
+            netDelta = netDelta.add(pos.isLong ? pos.sizeUSD : pos.sizeUSD.neg());
         }
         return {
             var95_1d: varMetrics.var95_1d,

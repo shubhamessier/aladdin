@@ -34,29 +34,7 @@ export class PortfolioState {
     private bounds: Map<string, AssetAllocationBounds> = new Map();
 
     public static reconstruct(onChainState: OnChainState): PortfolioState {
-        const state = new PortfolioState();
-        
-        // Mock reconstruction logic
-        state.totalValueUSD = new Decimal(onChainState.totalValueUSD || 0);
-        state.drawdownFromHWM = new Decimal(onChainState.drawdown || 0);
-        
-        state.derivativePositions = (onChainState.derivativePositions || []).map(p => ({
-            ...p,
-            sizeUSD: new Decimal(p.sizeUSD),
-            margin: new Decimal(p.margin),
-            unrealizedPnL: new Decimal(p.unrealizedPnL)
-        }));
-
-        for (const [asset, balance] of Object.entries(onChainState.balances || {})) {
-            const priceData = onChainState.prices.find(p => p.token === asset);
-            const price = priceData ? new Decimal(priceData.price.toString()).div(new Decimal(10).pow(18)) : new Decimal(0);
-            const amount = BigInt(balance);
-            const valueUSD = new Decimal(amount.toString()).div(new Decimal(10).pow(18)).mul(price);
-            
-            state.positions.set(asset, { asset, amount, valueUSD });
-        }
-
-        return state;
+        throw new Error("reconstruct() is unsafe in HFT. Use EventSourcingLedger to rebuild state deterministically from WebSocket ACKs.");
     }
 
     public getAllocations(): Record<string, Decimal> {
