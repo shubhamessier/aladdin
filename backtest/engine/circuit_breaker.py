@@ -36,7 +36,7 @@ class RecoveryPhase:
             return 0.50
     
     @property
-    def snap_back_threshold(self) -> float:
+    def further_decline_threshold(self) -> float:
         if self.weeks_in_recovery <= 2:
             return 0.03
         elif self.weeks_in_recovery <= 4:
@@ -44,11 +44,12 @@ class RecoveryPhase:
         else:
             return 0.07
     
-    def check_snap_back(self, current_value: float) -> bool:
-        if not self.is_active:
+    def check_further_decline(self, current_value: float) -> bool:
+        if not self.is_active or self.entry_portfolio_value == 0:
             return False
+        # If value drops further than threshold from entry, it's a further decline
         drop = (self.entry_portfolio_value - current_value) / self.entry_portfolio_value
-        return drop > self.snap_back_threshold
+        return drop > self.further_decline_threshold
     
     def advance_week(self) -> None:
         self.weeks_in_recovery += 1
@@ -63,7 +64,7 @@ class RecoveryPhase:
         self.is_active = False
         self.entry_date = None
     
-    def snap_back(self) -> None:
+    def reset_recovery(self) -> None:
         self.is_active = False
         self.snap_back_count += 1
 
@@ -89,10 +90,10 @@ class CircuitBreaker:
         self.hwm_absolute: float = 0.0
         self.last_peak_time: Optional[datetime] = None
         self.cb_no_further_drop_since: Optional[datetime] = None
-        self.history: List[Tuple[datetime, float]] = []
+        self.level_set_time: Optional[datetime] = None
 
     def update(self, current_time: datetime, current_value: float, rolling_vol: float, avg_vol: float) -> int:
-        if current_value > self.hwm_absolute:
+        if self.hwm_absolute == 0 or current_value > self.hwm_absolute:
             self.hwm_absolute = current_value
             self.last_peak_time = current_time
             self.cb_no_further_drop_since = current_time
@@ -110,17 +111,30 @@ class CircuitBreaker:
         if warranted > self.current_level:
             self.current_level = warranted
             self.cb_no_further_drop_since = current_time
+            self.level_set_time = current_time
         elif self.current_level > warranted:
-            # Check for decay
+            # BUG-08: Relaxed decay conditions
             stable_days = (current_time - self.cb_no_further_drop_since).days if self.cb_no_further_drop_since else 0
+            days_in_level = (current_time - self.level_set_time).days if self.level_set_time else 0
             vol_ratio = rolling_vol / max(avg_vol, 1e-6)
             
             can_decay = False
-            if self.current_level == 3 and stable_days >= 14 and vol_ratio < 2.0: can_decay = True
-            elif self.current_level == 2 and stable_days >= 21 and vol_ratio < 1.5: can_decay = True
-            elif self.current_level == 1 and stable_days >= 14 and vol_ratio < 1.5: can_decay = True
+            # Option 1: Volatility has normalized
+            if vol_ratio < 1.2:
+                can_decay = True
+            # Option 2: Time-based decay if no new lows
+            elif self.current_level == 3 and stable_days >= 7:
+                can_decay = True
+            elif self.current_level == 2 and stable_days >= 14:
+                can_decay = True
+            elif self.current_level == 1 and stable_days >= 7:
+                can_decay = True
+            # Option 3: Forced decay after long period even if not "stable" (prevents trap)
+            elif days_in_level > 60:
+                can_decay = True
             
             if can_decay:
                 self.current_level -= 1
+                self.level_set_time = current_time
                 
         return self.current_level

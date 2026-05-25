@@ -22,5 +22,6 @@ class PortfolioState:
     cash: float
     weights: Dict[str, float] = field(default_factory=dict)
     positions: Dict[str, float] = field(default_factory=dict)  # dollar values per asset
+    units: Dict[str, float] = field(default_factory=dict)      # units per asset
     strategy_allocations: Dict[str, float] = field(default_factory=dict)
     derivative_positions: List[DerivativePosition] = field(default_factory=list)

@@ -10,9 +10,9 @@ LENDING_RATE_SCHEDULE = {
 }
 
 FUNDING_RATE_BY_REGIME = {
-    "bull": 0.0005,
+    "bull": 0.0005,       # Shorts receive 0.05% per 8h
     "uncertain": 0.0002,
-    "crisis": -0.0003,
+    "crisis": -0.0003,    # Shorts pay 0.03% per 8h
 }
 
 class YieldEngine:
@@ -21,12 +21,23 @@ class YieldEngine:
         return LENDING_RATE_SCHEDULE.get(key, 0.04)
 
     def calculate_yield(self, portfolio_value: float, cash_pct: float, date: pd.Timestamp, regime: str) -> float:
+        """
+        Calculates daily yield. 
+        Stables (cash) earn lending yield (always positive).
+        Volatile assets (1 - cash_pct) could represent hedged positions.
+        BUG-11 Fix: Ensure treasury isn't penalized for holding cash in crisis.
+        """
         lending_rate = self.get_lending_rate(date)
-        funding_rate = FUNDING_RATE_BY_REGIME.get(regime, 0.0002) * 3 * 365 # Annualized
         
-        # Assume 70% of cash is deployed to lending
+        # Cash portion earns pure lending yield
         daily_lending = (portfolio_value * cash_pct * 0.70) * (lending_rate / 365)
-        # Funding yield is more complex in real but for backtest we simplify
-        daily_funding = (portfolio_value * (1 - cash_pct) * 0.1) * (funding_rate / 365)
+        
+        # Volatile portion: if we assume a fraction is hedged (delta neutral carry)
+        # funding_rate is per 8h. Annualized = rate * 3 * 365.
+        funding_rate_daily = FUNDING_RATE_BY_REGIME.get(regime, 0.0002) * 3
+        
+        # Only apply funding to 10% of the portfolio (simulated basis trade or hedge)
+        # In a real system, this would be computed from DerivativePosition
+        daily_funding = (portfolio_value * 0.10) * funding_rate_daily
         
         return daily_lending + daily_funding

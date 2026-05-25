@@ -20,6 +20,7 @@ from backtest.engine.portfolio import PortfolioState
 from backtest.engine.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, RecoveryPhase, compute_effective_hwm
 from backtest.engine.yield_engine import YieldEngine
 from backtest.engine.cost_model import TransactionCostModel, CostModelConfig
+from backtest.engine.strategies import AllocationStrategy
 
 class TreasurySimulator:
     def __init__(
@@ -29,12 +30,15 @@ class TreasurySimulator:
         end_date: datetime,
         assets: List[str],
         circuit_breaker_config: CircuitBreakerConfig,
+        strategy: AllocationStrategy
     ):
         self.portfolio = PortfolioState(
             timestamp=start_date,
             portfolio_value=initial_cash,
             cash=initial_cash,
-            weights={a: 0.0 for a in assets}
+            weights={a: 0.0 for a in assets},
+            units={a: 0.0 for a in assets},
+            positions={a: 0.0 for a in assets}
         )
         self.assets = assets
         self.start_date = start_date
@@ -43,7 +47,8 @@ class TreasurySimulator:
         self.recovery = RecoveryPhase()
         self.yield_engine = YieldEngine()
         self.cost_model = TransactionCostModel(CostModelConfig())
-        self.regime_detector = RobustRegimeDetector()
+        self.regime_detector = RobustRegimeDetector(min_observations=60) # Reduced for earlier signal
+        self.strategy = strategy
         
         self.history: List[Dict[str, Any]] = []
         self.market_data: pd.DataFrame = pd.DataFrame()
@@ -51,17 +56,25 @@ class TreasurySimulator:
         
         self.vol_history_30d: List[float] = []
         self.avg_vol_lifetime: float = 0.02
+        self.warmup_days = 60
 
     def load_market_data(self, price_history: pd.DataFrame) -> None:
         self.market_data = price_history
 
     def run(self, verbose: bool = False) -> dict[str, Any]:
-        warmup = 60
+        # BUG-15: Regime warm-up if possible
+        if not self.market_data.empty:
+            # If we have data before start_date, fit here. 
+            # In backtest we usually start from day 0.
+            initial_idx = self.market_data.iloc[:self.warmup_days].pct_change().fillna(0).mean(axis=1)
+            if len(initial_idx) >= 60:
+                self.regime_detector.fit(initial_idx)
+
         for day in range(len(self.market_data)):
             self.current_day = day
             self.step()
             
-            if day >= warmup and day % 30 == 0:
+            if day >= self.warmup_days and day % 30 == 0:
                 lookback = self.market_data.iloc[max(0, day-504):day]
                 returns = lookback.pct_change().fillna(0).mean(axis=1)
                 self.regime_detector.refit_rolling(returns)
@@ -72,22 +85,30 @@ class TreasurySimulator:
         date = self.market_data.index[self.current_day]
         prices = self.market_data.iloc[self.current_day]
         
+        # 1. Mark to Market (Fix BUG-04)
         if self.current_day > 0:
-            prev_prices = self.market_data.iloc[self.current_day - 1]
             new_val = self.portfolio.cash
-            for asset, weight in self.portfolio.weights.items():
-                if weight > 0:
-                    new_val += (self.portfolio.portfolio_value * weight) * (prices[asset] / prev_prices[asset])
+            for asset in self.assets:
+                val = self.portfolio.units[asset] * prices[asset]
+                self.portfolio.positions[asset] = val
+                new_val += val
             self.portfolio.portfolio_value = new_val
+            
+            # Update weights for drift tracking
+            if self.portfolio.portfolio_value > 0:
+                for asset in self.assets:
+                    self.portfolio.weights[asset] = self.portfolio.positions[asset] / self.portfolio.portfolio_value
 
+        # 2. Risk & Regime
         returns_history = self.market_data.iloc[max(0, self.current_day-252):self.current_day+1].pct_change().fillna(0)
         crypto_idx = returns_history.mean(axis=1)
         regime_pred = self.regime_detector.predict(crypto_idx)
         
-        rolling_vol = crypto_idx.tail(30).std() if self.current_day > 10 else 0.02
+        rolling_vol = crypto_idx.tail(30).std() if len(crypto_idx) > 10 else 0.02
         self.vol_history_30d.append(rolling_vol)
         self.avg_vol_lifetime = np.mean(self.vol_history_30d)
         
+        # 3. Update CB
         prev_cb_level = self.cb.current_level
         current_cb_level = self.cb.update(date, self.portfolio.portfolio_value, rolling_vol, self.avg_vol_lifetime)
         
@@ -95,51 +116,83 @@ class TreasurySimulator:
         days_since_hwm = (date - self.cb.last_peak_time).days if self.cb.last_peak_time else 0
         eff_hwm = compute_effective_hwm(self.cb.hwm_absolute, self.portfolio.portfolio_value, days_since_hwm, self.cb.config.hwm_decay_halflife_days)
 
+        # 4. Recovery Management (Fix BUG-06)
         if prev_cb_level >= 2 and current_cb_level == 1 and not self.recovery.is_active:
             self.recovery.enter(pd.Timestamp(date), self.portfolio.portfolio_value)
             
         if self.recovery.is_active:
-            if (pd.Timestamp(date) - self.recovery.entry_date).days % 7 == 0:
+            days_in = (pd.Timestamp(date) - self.recovery.entry_date).days
+            if days_in >= 49: # 7 weeks
+                self.recovery.exit()
+            elif days_in > 0 and days_in % 7 == 0:
                 self.recovery.advance_week()
-            if self.recovery.check_snap_back(self.portfolio.portfolio_value):
-                self.recovery.snap_back()
+            
+            if self.recovery.check_further_decline(self.portfolio.portfolio_value):
+                self.recovery.reset_recovery()
                 self.cb.current_level = 2
                 current_cb_level = 2
 
-        daily_yield = self.yield_engine.calculate_yield(self.portfolio.portfolio_value, self.portfolio.cash/self.portfolio.portfolio_value if self.portfolio.portfolio_value > 0 else 1.0, pd.Timestamp(date), regime_pred.current_regime)
+        # 5. Yield
+        cash_pct = self.portfolio.cash/self.portfolio.portfolio_value if self.portfolio.portfolio_value > 0 else 1.0
+        daily_yield = self.yield_engine.calculate_yield(self.portfolio.portfolio_value, cash_pct, pd.Timestamp(date), regime_pred.current_regime)
         self.portfolio.portfolio_value += daily_yield
+        # Pro-rata add yield to cash for simplicity
+        self.portfolio.cash += daily_yield
         
-        if self.current_day % 7 == 0 and current_cb_level < 2:
-            try:
-                lookback_returns = returns_history.tail(self.current_day if self.current_day < 252 else 252)
-                if len(lookback_returns) > 20:
-                    cov = build_covariance(lookback_returns)
-                    res_weights = optimize_risk_parity(
-                        returns=lookback_returns,
-                        covariance=cov,
-                        assets=self.assets,
-                        min_stable_reserve=0.20 if regime_pred.current_regime != 'crisis' else 0.60
+        # 6. Rebalance (Fix BUG-05/07 and wire strategies BUG-01/02)
+        should_rebalance = (self.current_day % 7 == 0) or (current_cb_level >= 2 and prev_cb_level < 2)
+        
+        trade_vol = 0.0
+        if should_rebalance:
+            if current_cb_level >= 2:
+                # Emergency de-risk
+                target_weights = {a: 0.0 for a in self.assets}
+                if "USDC" in self.assets: target_weights["USDC"] = 1.0
+                elif "USDT" in self.assets: target_weights["USDT"] = 1.0
+            else:
+                try:
+                    lookback_returns = returns_history.tail(252)
+                    cov = build_covariance(lookback_returns) if len(lookback_returns) > 20 else np.eye(len(self.assets)) * 0.01
+                    max_vol_override = self.recovery.max_volatile_pct if self.recovery.is_active else None
+                    
+                    target_weights = self.strategy.generate_target_weights(
+                        current_weights=self.portfolio.weights,
+                        expected_returns={},
+                        covariance_matrix=cov,
+                        asset_names=self.assets,
+                        max_volatile_override=max_vol_override,
+                        current_regime=regime_pred.current_regime
                     )
-                    target_weights = res_weights.weights
-                else:
+                except Exception:
                     target_weights = {a: 1.0/len(self.assets) for a in self.assets}
-            except Exception:
-                target_weights = {a: 1.0/len(self.assets) for a in self.assets}
 
-            if self.recovery.is_active:
-                max_vol = self.recovery.max_volatile_pct
-                total_vol = sum(target_weights[a] for a in self.assets if a not in ['USDC', 'USDT', 'DAI'])
-                if total_vol > max_vol:
-                    scale = max_vol / total_vol
-                    for a in target_weights:
-                        if a not in ['USDC', 'USDT', 'DAI']:
-                            target_weights[a] *= scale
-
-            total_trade = sum(abs(target_weights.get(a, 0) - self.portfolio.weights.get(a, 0)) for a in self.assets) * self.portfolio.portfolio_value
-            cost = self.cost_model.estimate_cost(total_trade, "ETH", "buy", 1e8, 1e7).total
+            # Update units and handle costs
+            new_units = {}
+            for asset in self.assets:
+                old_val = self.portfolio.positions.get(asset, 0.0)
+                new_target_val = self.portfolio.portfolio_value * target_weights.get(asset, 0.0)
+                trade_vol += abs(new_target_val - old_val)
+            
+            # Use asset-specific slippage (handled in TCM)
+            cost = self.cost_model.estimate_cost(trade_vol, "ETH", "buy", 1e8, 1e7).total
             self.portfolio.portfolio_value -= cost
+            # Adjust cash to reflect new allocation and costs
+            self.portfolio.cash = self.portfolio.portfolio_value * (1.0 - sum(target_weights.values()))
+            
+            for asset in self.assets:
+                asset_val = self.portfolio.portfolio_value * target_weights.get(asset, 0.0)
+                self.portfolio.units[asset] = asset_val / prices[asset] if prices[asset] > 0 else 0
+                self.portfolio.positions[asset] = asset_val
+            
             self.portfolio.weights = target_weights
-            self.portfolio.cash = self.portfolio.portfolio_value * (1 - sum(target_weights.values()))
+
+        # 7. Risk Metrics (Fix BUG-17)
+        var_val = 0.0
+        if len(returns_history) > 30:
+            # Simplified VaR for logging
+            weights_arr = np.array([self.portfolio.weights.get(a, 0.0) for a in self.assets])
+            var_95, _ = compute_historical_var(returns_history.values, weights_arr)
+            var_val = var_95 * self.portfolio.portfolio_value
 
         self.history.append({
             "timestamp": date,
@@ -149,25 +202,25 @@ class TreasurySimulator:
             "cb_level": current_cb_level,
             "effective_hwm": eff_hwm,
             "recovery_active": self.recovery.is_active,
-            "var_95_1d": 0.0,
-            "trade_volume_usd": 0.0
+            "var_95_1d": var_val,
+            "trade_volume_usd": trade_vol
         })
 
     def summary(self) -> dict[str, Any]:
         if not self.history: return {}
-        vals = [h["portfolio_value"] for h in self.history]
-        total_return = (vals[-1] - vals[0]) / vals[0]
-        
-        drawdowns = []
-        max_val = 0.0
-        for v in vals:
-            if v > max_val: max_val = v
-            drawdowns.append((max_val - v) / max_val if max_val > 0 else 0)
+        vals = pd.Series([h["portfolio_value"] for h in self.history])
+        returns = vals.pct_change().dropna()
+        ann_return = ((1 + (vals.iloc[-1]-vals.iloc[0])/vals.iloc[0]) ** (365 / len(vals)) - 1)
+        ann_vol = returns.std() * np.sqrt(252)
+        sharpe = (ann_return - 0.02) / ann_vol if ann_vol > 0 else 0
+        drawdowns = (vals.cummax() - vals) / vals.cummax()
         
         return {
-            "total_return_pct": total_return * 100,
-            "annualized_return": ((1 + total_return) ** (365 / len(vals)) - 1),
-            "sharpe_ratio": (total_return * 100) / (np.std(vals) / np.mean(vals) * 100) if np.mean(vals) > 0 else 0,
-            "max_drawdown_pct": max(drawdowns) * 100,
-            "cb_days": sum(1 for h in self.history if h["cb_level"] > 0)
+            "total_return_pct": ((vals.iloc[-1] / vals.iloc[0]) - 1) * 100,
+            "annualized_return": ann_return,
+            "annualized_volatility": ann_vol,
+            "sharpe_ratio": sharpe,
+            "max_drawdown_pct": drawdowns.max() * 100,
+            "cb_days": sum(1 for h in self.history if h["cb_level"] > 0),
+            "total_trade_volume": sum(h["trade_volume_usd"] for h in self.history)
         }

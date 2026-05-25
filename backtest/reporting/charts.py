@@ -18,7 +18,8 @@ def setup_style() -> None:
 def generate_nav_comparison(
     portfolio_history: pd.DataFrame, 
     benchmark_history: pd.Series, 
-    output_dir: str = "output"
+    output_dir: str = "output",
+    filename: str = "nav_comparison.png"
 ) -> str:
     setup_style()
     os.makedirs(output_dir, exist_ok=True)
@@ -60,7 +61,7 @@ def generate_nav_comparison(
     ax.legend(by_label.values(), by_label.keys(), loc='upper left')
 
     plt.tight_layout()
-    output_path = os.path.join(output_dir, "nav_comparison.png")
+    output_path = os.path.join(output_dir, filename)
     plt.savefig(output_path, dpi=300)
     plt.close()
     return output_path
@@ -68,7 +69,8 @@ def generate_nav_comparison(
 def generate_drawdown_comparison(
     portfolio_history: pd.DataFrame, 
     benchmark_history: pd.Series, 
-    output_dir: str = "output"
+    output_dir: str = "output",
+    filename: str = "drawdown_comparison.png"
 ) -> str:
     setup_style()
     os.makedirs(output_dir, exist_ok=True)
@@ -89,7 +91,7 @@ def generate_drawdown_comparison(
     ax.set_ylabel('Drawdown (%)')
     ax.legend(loc='lower right')
     plt.tight_layout()
-    output_path = os.path.join(output_dir, "drawdown_comparison.png")
+    output_path = os.path.join(output_dir, filename)
     plt.savefig(output_path, dpi=300)
     plt.close()
     return output_path

@@ -32,6 +32,27 @@ from backtest.reporting.charts import (
 from backtest.analysis.metrics import calculate_performance_metrics
 from backtest.analysis.attribution import decompose_returns
 from backtest.optimizer.main import run_full_optimization, export_optimal_config
+from backtest.engine.strategies import (
+    AllocationStrategy, EqualWeightStrategy, RiskParityStrategy, 
+    RegimeAdaptiveStrategy, StaticConservativeStrategy, MinVarianceStrategy, 
+    BlackLittermanStrategy, StrategyConfig, RiskParityConfig, 
+    RegimeAdaptiveConfig, StaticConservativeConfig
+)
+
+def get_strategy(strat_dict: dict[str, Any]) -> AllocationStrategy:
+    name = strat_dict.get('name', 'Equal Weight')
+    if name == 'Risk Parity':
+        return RiskParityStrategy(RiskParityConfig(**strat_dict))
+    elif name == 'Regime-Adaptive':
+        return RegimeAdaptiveStrategy(RegimeAdaptiveConfig(**strat_dict))
+    elif name == 'Static Conservative':
+        return StaticConservativeStrategy(StaticConservativeConfig(**strat_dict))
+    elif name == 'Min Variance':
+        return MinVarianceStrategy(StrategyConfig(**strat_dict))
+    elif name == 'Black-Litterman':
+        return BlackLittermanStrategy(StrategyConfig(**strat_dict))
+    else:
+        return EqualWeightStrategy(StrategyConfig(**strat_dict))
 
 def load_config(config_path: str) -> dict[str, Any]:
     with open(config_path, 'r') as f:
@@ -62,7 +83,9 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         print("Error: No market data fetched.")
         return
 
-    benchmark = price_history.mean(axis=1)
+    # BUG-13: Benchmark is normalized price index
+    benchmark = (price_history / price_history.iloc[0]).mean(axis=1) * initial_cash
+    
     strategies = config.get('strategies', [{'name': 'Equal Weight'}])
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     cb_cfg_dict = config.get('circuit_breaker', {})
@@ -72,12 +95,17 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     for strat in strategies:
         strat_name = strat.get('name', 'Unknown Strategy')
         print(f"\n[{strat_name}] Starting Simulation...")
+        
+        # BUG-01: Instantiate correct strategy
+        strategy_obj = get_strategy(strat)
+        
         sim = TreasurySimulator(
             initial_cash=initial_cash,
             start_date=start_date,
             end_date=end_date,
             assets=assets,
-            circuit_breaker_config=cb_config
+            circuit_breaker_config=cb_config,
+            strategy=strategy_obj
         )
         sim.load_market_data(price_history)
         sim.run()
@@ -95,10 +123,12 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         print_simulation_summary(sim.history)
         print_performance_report(metrics, attribution)
         
-        generate_nav_comparison(history_df, benchmark, output_dir=output_dir)
-        generate_drawdown_comparison(history_df, benchmark, output_dir=output_dir)
-        
         safe_name = strat_name.replace(" ", "_").lower()
+        
+        # BUG-09: unique chart filenames
+        generate_nav_comparison(history_df, benchmark, output_dir=output_dir, filename=f"nav_comparison_{safe_name}.png")
+        generate_drawdown_comparison(history_df, benchmark, output_dir=output_dir, filename=f"drawdown_comparison_{safe_name}.png")
+        
         csv_path = f"{output_dir}/{safe_name}_history.csv"
         history_df.to_csv(csv_path)
         

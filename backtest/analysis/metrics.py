@@ -47,27 +47,34 @@ def calculate_performance_metrics(
     excess_return = annualized_return - risk_free_rate
     sharpe_ratio = excess_return / annualized_vol if annualized_vol > 0 else 0.0
     
-    # Sortino Ratio
-    negative_returns = returns[returns < 0]
-    downside_deviation = np.sqrt(np.mean(negative_returns**2)) * np.sqrt(annualization_factor)
+    # Sortino Ratio (BUG-12)
+    target = risk_free_rate / annualization_factor
+    downside_diff = np.minimum(returns - target, 0)
+    downside_deviation = np.sqrt(np.mean(downside_diff**2)) * np.sqrt(annualization_factor)
     sortino_ratio = excess_return / downside_deviation if downside_deviation > 0 else 0.0
     
     # Maximum Drawdown
     drawdowns = calculate_drawdowns(values)
     max_drawdown = drawdowns.min()
     
-    # VaR using Risk Engine
+    # VaR using Risk Engine (BUG-03)
     current_value = values.iloc[-1]
     
-    # Var Models usually takes Returns Series or List, and portfolio value
     try:
-        # Assuming compute_historical_var signature from risk_engine
-        var_results = compute_historical_var(
-            returns=returns.values.tolist(), 
-            portfolio_value=current_value
+        # compute_historical_var(returns: T x N, weights: N) -> (var, cvar)
+        var_95, _ = compute_historical_var(
+            returns=returns.values.reshape(-1, 1), 
+            weights=np.array([1.0]),
+            confidence_level=0.95
         )
-        var_95_1d = var_results.var_95_1d
-        var_99_1d = var_results.var_99_1d
+        var_95_1d = var_95 * current_value
+        
+        var_99, _ = compute_historical_var(
+            returns=returns.values.reshape(-1, 1), 
+            weights=np.array([1.0]),
+            confidence_level=0.99
+        )
+        var_99_1d = var_99 * current_value
     except Exception:
         # Fallback if api differs
         losses = -returns.values
