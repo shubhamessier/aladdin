@@ -4,14 +4,14 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any
 import pandas as pd
+import numpy as np
 import yaml
 import json
 
 class MockMarketData:
     def __init__(self, prices: pd.DataFrame): 
         self.prices = prices
-        # Mock other needed data
-        self.returns_log = prices.pct_change().fillna(0)
+        self.returns_log = np.log(prices / prices.shift(1)).fillna(0)
     def slice_by_index(self, s: int, e: int) -> Any: 
         return MockMarketData(self.prices.iloc[s:e])
 
@@ -94,7 +94,6 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         return
     assets = [a for a in assets if a in price_history.columns]
 
-    # BUG-13: Benchmark is normalized price index
     benchmark = (price_history / price_history.iloc[0]).mean(axis=1) * initial_cash
     
     strategies = config.get('strategies', [{'name': 'Equal Weight'}])
@@ -107,7 +106,6 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         strat_name = strat.get('name', 'Unknown Strategy')
         print(f"\n[{strat_name}] Starting Simulation...")
         
-        # BUG-01: Instantiate correct strategy
         strategy_obj = get_strategy(strat)
         
         sim = TreasurySimulator(
@@ -128,15 +126,13 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         history_df.set_index('timestamp', inplace=True)
         history_df.index = pd.to_datetime(history_df.index)
         
-        metrics = calculate_performance_metrics(history_df, risk_free_rate=sim_config.get('risk_free_rate', 0.02))
+        metrics = calculate_performance_metrics(history_df, risk_free_rate=sim_config.get('risk_free_rate', 0.05))
         attribution = decompose_returns(history_df, benchmark)
         
         print_simulation_summary(sim.history)
         print_performance_report(metrics, attribution)
         
         safe_name = strat_name.replace(" ", "_").lower()
-        
-        # BUG-09: unique chart filenames
         generate_nav_comparison(history_df, benchmark, output_dir=output_dir, filename=f"nav_comparison_{safe_name}.png")
         generate_drawdown_comparison(history_df, benchmark, output_dir=output_dir, filename=f"drawdown_comparison_{safe_name}.png")
         
@@ -151,6 +147,49 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
 
         if monte_carlo:
             print(f"[{strat_name}] Running Monte Carlo projections...")
+            try:
+                from risk_engine.monte_carlo import simulate_portfolio
+                from risk_engine.covariance import build_covariance
+                
+                # Get last state
+                final_val = history_df['portfolio_value'].iloc[-1]
+                final_weights = sim.portfolio.weights
+                
+                # Prepare returns for covariance
+                recent_returns = price_history.pct_change().tail(252).fillna(0)
+                cov = build_covariance(recent_returns)
+                corr = np.corrcoef(recent_returns.values.T)
+                
+                # Simple expected returns from history
+                ann_returns = recent_returns.mean() * 252
+                vols = recent_returns.std() * np.sqrt(252)
+                
+                # Run MC
+                current_values = np.array([final_weights.get(a, 0.0) * final_val for a in assets])
+                mc_res = simulate_portfolio(
+                    current_values=current_values,
+                    expected_returns=ann_returns.values,
+                    volatilities=vols.values,
+                    correlation=corr,
+                    horizon_days=90,
+                    n_simulations=10000 # Reduced for speed
+                )
+                
+                summary_data[strat_name]['monte_carlo'] = {
+                    'var_95': mc_res.var_95,
+                    'cvar_95': mc_res.cvar_95,
+                    'expected_max_drawdown': mc_res.expected_max_drawdown,
+                    'prob_ruin_30pct': mc_res.prob_ruin_30pct,
+                    'mean_return': mc_res.mean_return
+                }
+                print(f"[{strat_name}] Monte Carlo projection complete.")
+                print(f"[{strat_name}] 90-day Expected Return: {mc_res.mean_return:.2%}")
+                print(f"[{strat_name}] 90-day VaR 95%: ${mc_res.var_95:,.2f}")
+                
+            except Exception as e:
+                print(f"[{strat_name}] Monte Carlo projection failed: {e}")
+                import traceback
+                traceback.print_exc()
                 
     summary_path = f"{output_dir}/summary.json"
     with open(summary_path, 'w') as f:
