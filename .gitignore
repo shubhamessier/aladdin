@@ -5,11 +5,14 @@ GEMINI.md
 MEMORY.md
 plans/
 
-# Ignore all markdown files except README.md
+# Ignore all markdown files by default
 **/*.md
 *.md
-!**/README.md
+
+# Allow only the root README.md and files in docs/
 !README.md
+!docs/
+!docs/*.md
 
 # Node
 node_modules/
@@ -30,3 +33,6 @@ cache/
 out/
 broadcast/
 lib/
+
+# Logs
+*.log

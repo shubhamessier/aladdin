@@ -1,6 +1,12 @@
+import sys
+from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 import numpy as np
+
+_risk_engine_path = Path(__file__).resolve().parent.parent.parent / "python-risk"
+if str(_risk_engine_path) not in sys.path:
+    sys.path.append(str(_risk_engine_path))
 
 class StrategyConfig(BaseModel):
     name: str
@@ -68,9 +74,15 @@ class AllocationStrategy:
                 else:
                     new_weights[name] = w
             
-            # Re-allocate the difference to USDC
+            # Re-allocate the difference to first stable asset present in portfolio
             diff = volatile_sum - new_volatile_sum
-            new_weights["USDC"] = new_weights.get("USDC", 0.0) + diff
+            stable_fallback = next((s for s in ["USDC", "USDT", "DAI"] if s in weights), None)
+            if stable_fallback:
+                new_weights[stable_fallback] = new_weights.get(stable_fallback, 0.0) + diff
+            else:
+                total = sum(new_weights.values())
+                if total > 0:
+                    new_weights = {k: v / total for k, v in new_weights.items()}
             return new_weights
             
         return weights
@@ -99,11 +111,15 @@ class RiskParityStrategy(AllocationStrategy):
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain"
     ) -> Dict[str, float]:
-        # Inverse volatility as a simple fallback approximation of risk parity
-        vols = np.sqrt(np.diag(covariance_matrix))
-        inv_vols = 1.0 / np.maximum(vols, 1e-6)
-        weights_arr = inv_vols / np.sum(inv_vols)
-        weights = {name: float(w) for name, w in zip(asset_names, weights_arr)}
+        try:
+            from risk_engine.portfolio_optimizer import optimize_risk_parity
+            rp_weights = optimize_risk_parity(covariance_matrix)
+            weights = {name: float(w) for name, w in zip(asset_names, rp_weights)}
+        except Exception:
+            vols = np.sqrt(np.diag(covariance_matrix))
+            inv_vols = 1.0 / np.maximum(vols, 1e-6)
+            weights_arr = inv_vols / np.sum(inv_vols)
+            weights = {name: float(w) for name, w in zip(asset_names, weights_arr)}
         return self._apply_volatile_override(weights, max_volatile_override)
 
 class EqualWeightStrategy(AllocationStrategy):

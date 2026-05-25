@@ -40,7 +40,7 @@ def calculate_performance_metrics(
     mean_return = returns.mean()
     volatility = returns.std()
     
-    annualized_return = mean_return * annualization_factor
+    annualized_return = (1 + mean_return) ** annualization_factor - 1
     annualized_vol = volatility * np.sqrt(annualization_factor)
     
     # Sharpe Ratio

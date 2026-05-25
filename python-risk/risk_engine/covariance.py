@@ -63,17 +63,19 @@ def build_covariance(returns: pd.DataFrame, ewma_halflife: int = 63) -> np.ndarr
     """
     t, n = returns.shape
     
-    # 1. EWMA Covariance
-    # We use EWMA to capture recent volatility shifts
+    # 1. EWMA Covariance — captures recent volatility clustering
     ewma_cov = returns.ewm(halflife=ewma_halflife).cov().iloc[-n:].values
-    
-    # 2. Ledoit-Wolf Shrinkage
-    # Ledoit-Wolf is typically applied to sample covariance, but here we can 
-    # use it to shrink the EWMA cov towards a constant correlation target 
-    # or just use it as a standalone stabilizer.
-    # For simplicity and following 4.2: apply LW then MP.
+
+    # 2. Ledoit-Wolf Shrinkage applied to raw returns for optimal shrinkage intensity
     lw = LedoitWolf().fit(returns.values)
     shrunk_cov = lw.covariance_
+
+    # Rescale LW covariance to use EWMA volatilities (combines LW stability with EWMA recency)
+    lw_stds = np.sqrt(np.diag(shrunk_cov))
+    ewma_stds = np.sqrt(np.maximum(np.diag(ewma_cov), 1e-10))
+    if np.all(lw_stds > 0):
+        scale = ewma_stds / lw_stds
+        shrunk_cov = shrunk_cov * np.outer(scale, scale)
     
     # 3. RMT De-noising
     corr, std = cov_to_corr(shrunk_cov)

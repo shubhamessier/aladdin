@@ -76,12 +76,23 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         if not df.empty:
             df = df[['close']].rename(columns={'close': asset})
             dfs.append(df)
-            
-    if dfs:
-        price_history = pd.concat(dfs, axis=1).ffill().bfill()
-    else:
+
+    if not dfs:
         print("Error: No market data fetched.")
         return
+
+    price_history = pd.concat(dfs, axis=1).ffill().bfill()
+    fetched_assets = list(price_history.columns)
+    missing = [a for a in assets if a not in fetched_assets]
+    if missing:
+        print(f"Warning: Could not fetch {missing}. Proceeding with {fetched_assets}.")
+        assets = fetched_assets
+
+    price_history = price_history.dropna(axis=1, how='all')
+    if price_history.empty:
+        print("Error: All asset price data is NaN.")
+        return
+    assets = [a for a in assets if a in price_history.columns]
 
     # BUG-13: Benchmark is normalized price index
     benchmark = (price_history / price_history.iloc[0]).mean(axis=1) * initial_cash
