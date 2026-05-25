@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import logging
+logging.getLogger("hmmlearn").setLevel(logging.CRITICAL)
 from hmmlearn.hmm import GaussianHMM  # type: ignore
 from scipy.stats import norm, rankdata  # type: ignore
 from typing import Dict, Any, List, Optional

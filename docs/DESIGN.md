@@ -108,3 +108,46 @@ The backtest assumed a stationary liquidity model and 100% fill rates at mid-pri
   - **Latency Decay:** Expected edge drops by $X$ bps per millisecond of delay.
   - **Stochastic Partial Fills:** Large orders only fill a calculated `fill_ratio` based on local volatility; the rest of the order experiences severe adverse selection (the market runs away from the passive limit).
   - **Correlation Spikes:** During simulated crises (e.g., portfolio drop > 10% in 1 day), asset correlations are artificially forced to 0.95+ to simulate cross-margin liquidation cascades.
+
+---
+
+## 8. Event-Level Market Replay (No Mid-Price Execution Fantasy)
+
+### The Mistake:
+The backtest assumed `Executed Price = Observed Mid-Price`. This is the single biggest source of fake alpha in HFT benchmarking. It ignored spread crossing, taker fees, slippage, and adverse selection, generating positive PnL for trades that mathematically carry a negative expectancy in production.
+
+### The Design Pattern:
+**Tick-Level Orderbook Replay**
+- A realistic benchmark must simulate the execution process against the actual L2 orderbook.
+- **Implementation:**
+  - Ingest tick-level data (or high-resolution snapshots) including top-of-book depth and real funding intervals.
+  - Implement a `Match Engine Simulator` that forces strategy orders to cross the spread and deducts the correct Maker/Taker fees.
+
+---
+
+## 9. Inventory Carry Cost & Funding Dynamics
+
+### The Mistake:
+The benchmark completely ignored funding rates and treated perpetual futures like spot assets. Holding a directional perp position during adverse funding bleeds capital, turning a directionally correct trade into a net loser.
+
+### The Design Pattern:
+**Expected PnL with Full Economics**
+- Every position must be priced with its holding cost.
+- **Implementation:**
+  - `Expected PnL = Directional Edge + Carry - Funding - Fees - Impact - Inventory Cost`.
+  - Simulate funding payments strictly on 8-hour intervals matching exchange mechanics.
+  - Introduce an `Inventory Cost Penalty` that decays signal alpha based on holding time.
+
+---
+
+## 10. Exchange Failure & Latency Modeling
+
+### The Mistake:
+Benchmarks assumed `Decision Time = Execution Time`. In reality, network latency, websocket lag, and matching engine delay consume the signal edge. Additionally, the benchmark assumed 100% exchange uptime.
+
+### The Design Pattern:
+**Adversarial Exchange Simulation**
+- The backtester must inject real-world faults.
+- **Implementation:**
+  - **Jitter Simulation:** Add a randomized latency delay (e.g., $100ms - 400ms$) between signal generation and simulated order arrival. Delay fills accordingly.
+  - **Outage Replay:** Inject synthetic API disconnects and websocket timeouts. The strategy logic must prove it fails gracefully (e.g., entering `SHUTDOWN` and attempting `CANCEL_ALL`) rather than continuing blindly.
