@@ -1,11 +1,8 @@
 # Agent files
 gemini.log
 .gemini/
-GEMINI.md
 MEMORY.md
 plans/
-
-# Ignore all markdown files by default
 
 
 # Allow only the root README.md and files in docs/
