@@ -6,8 +6,7 @@ MEMORY.md
 plans/
 
 # Ignore all markdown files by default
-**/*.md
-*.md
+
 
 # Allow only the root README.md and files in docs/
 !README.md
