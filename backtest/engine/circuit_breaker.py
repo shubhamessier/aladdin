@@ -19,6 +19,7 @@ class RecoveryPhase:
     is_active: bool = False
     entry_date: Optional[pd.Timestamp] = None
     entry_portfolio_value: float = 0.0
+    recovery_peak: float = 0.0
     weeks_in_recovery: int = 0
     snap_back_count: int = 0
     
@@ -43,12 +44,16 @@ class RecoveryPhase:
             return 0.05
         else:
             return 0.07
+            
+    def update_peak(self, current_value: float) -> None:
+        if self.is_active and current_value > self.recovery_peak:
+            self.recovery_peak = current_value
     
     def check_further_decline(self, current_value: float) -> bool:
-        if not self.is_active or self.entry_portfolio_value == 0:
+        if not self.is_active or self.recovery_peak == 0:
             return False
-        # If value drops further than threshold from entry, it's a further decline
-        drop = (self.entry_portfolio_value - current_value) / self.entry_portfolio_value
+        # If value drops further than threshold from peak, it's a further decline
+        drop = (self.recovery_peak - current_value) / self.recovery_peak
         return drop > self.further_decline_threshold
     
     def advance_week(self) -> None:
@@ -58,15 +63,18 @@ class RecoveryPhase:
         self.is_active = True
         self.entry_date = date
         self.entry_portfolio_value = portfolio_value
+        self.recovery_peak = portfolio_value
         self.weeks_in_recovery = 0
     
     def exit(self) -> None:
         self.is_active = False
         self.entry_date = None
+        self.recovery_peak = 0.0
     
     def reset_recovery(self) -> None:
         self.is_active = False
         self.snap_back_count += 1
+        self.recovery_peak = 0.0
 
 def compute_effective_hwm(
     hwm_absolute: float,

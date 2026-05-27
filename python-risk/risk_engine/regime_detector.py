@@ -30,7 +30,7 @@ class RobustRegimeDetector:
     def __init__(
         self,
         n_states: int = 3,
-        n_fits: int = 20,
+        n_fits: int = 2,
         sticky_alpha: float = 10.0,
         switch_alpha: float = 1.0,
         transform_returns: bool = True,
@@ -48,12 +48,15 @@ class RobustRegimeDetector:
         self._raw_returns: Optional[pd.Series] = None
 
     def fit(self, returns: pd.Series) -> bool:
+        returns = returns.dropna()
         if len(returns) < self.min_observations:
             return False
-        
+
         self._raw_returns = returns
         transformed = inverse_normal_transform(returns) if self.transform_returns else returns
         X = transformed.values.reshape(-1, 1)
+        if np.any(np.isnan(X)) or np.any(np.isinf(X)):
+            return False
         
         startprob_prior = np.ones(self.n_states)
         transmat_prior = np.full((self.n_states, self.n_states), self.switch_alpha)
@@ -67,7 +70,7 @@ class RobustRegimeDetector:
                 model = GaussianHMM(
                     n_components=self.n_states,
                     covariance_type="full",
-                    n_iter=500,
+                    n_iter=30,
                     tol=1e-4,
                     random_state=seed,
                     init_params="mc",
@@ -123,9 +126,8 @@ class RobustRegimeDetector:
         X = transformed.values.reshape(-1, 1)
         
         try:
-            states = self.model.predict(X)
             probs = self.model.predict_proba(X)
-            current_raw = int(states[-1])
+            current_raw = int(np.argmax(probs[-1]))
             current_regime = self.state_map.get(current_raw, "uncertain")
             
             trans = self.model.transmat_

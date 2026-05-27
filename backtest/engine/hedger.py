@@ -30,14 +30,15 @@ class HedgingEngine:
         for token, amount in state.positions.items():
             # Exclude stablecoins from hedging
             if token in prices and token not in ["USDC", "USDT", "DAI"]:
-                spot_delta_usd[token] = amount * prices[token]
+                # amount is already in USD per PortfolioState definition
+                spot_delta_usd[token] = amount
                 
         # 2. Calculate current derivative delta
         deriv_delta_usd: Dict[str, float] = {}
         for pos in state.derivative_positions:
-            token = pos.symbol.replace("-PERP", "") 
-            direction = 1.0 if pos.is_long else -1.0
-            delta = pos.notional_value * direction
+            token = pos.market.replace("-PERP", "") 
+            direction = 1.0 if pos.direction == "long" else -1.0
+            delta = pos.notional_usd * direction
             deriv_delta_usd[token] = deriv_delta_usd.get(token, 0.0) + delta
             
         # 3. Calculate target derivative delta and adjustments

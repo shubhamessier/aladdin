@@ -1,12 +1,19 @@
 import argparse
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 import pandas as pd
 import numpy as np
 import yaml
 import json
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class MockMarketData:
     def __init__(self, prices: pd.DataFrame): 
@@ -39,6 +46,10 @@ from backtest.engine.strategies import (
     RegimeAdaptiveConfig, StaticConservativeConfig
 )
 
+from backtest.data.funding import fetch_funding_rates
+from backtest.data.lending import fetch_lending_rates
+from backtest.engine.yield_engine import YieldEngine
+
 def get_strategy(strat_dict: dict[str, Any]) -> AllocationStrategy:
     name = strat_dict.get('name', 'Equal Weight')
     if name == 'Risk Parity':
@@ -66,13 +77,19 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     end_date = datetime.strptime(sim_config.get('end_date', '2024-01-01'), '%Y-%m-%d')
     assets = sim_config.get('assets', ['BTC', 'ETH', 'USDC'])
     initial_cash = sim_config.get('initial_cash', 1000000.0)
-    source = sim_config.get('data_source', 'binance')
+    source = sim_config.get('data_source', 'hyperliquid')
+    risk_free_rate = sim_config.get('risk_free_rate', 0.05)
 
-    print(f"Fetching market data for {assets} from {start_date.date()} to {end_date.date()}...")
+    # Fetch pre-warmup data (90 days before start)
+    warmup_start = start_date - timedelta(days=90)
+    
+    print(f"Fetching market data for {assets} (including 90d warmup) from {warmup_start.date()} to {end_date.date()}...")
     fetcher = DataFetcher(cache_dir="backtest/cache")
     dfs = []
     for asset in assets:
-        df = fetcher.fetch_ohlcv(asset, int(start_date.timestamp()), int(end_date.timestamp()), source=source)
+        # F2A: Use hourly HL-native data if requested in config, else daily
+        interval = sim_config.get('interval', '1d')
+        df = fetcher.fetch_ohlcv(asset, int(warmup_start.timestamp()), int(end_date.timestamp()), source=source, interval=interval)
         if not df.empty:
             df = df[['close']].rename(columns={'close': asset})
             dfs.append(df)
@@ -82,19 +99,59 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         return
 
     price_history = pd.concat(dfs, axis=1).ffill().bfill()
-    fetched_assets = list(price_history.columns)
-    missing = [a for a in assets if a not in fetched_assets]
-    if missing:
-        print(f"Warning: Could not fetch {missing}. Proceeding with {fetched_assets}.")
-        assets = fetched_assets
+    
+    # BUG-5-10: Validate fetched assets
+    fetched_assets = price_history.columns.tolist()
+    missing_assets = [a for a in assets if a not in fetched_assets]
+    if missing_assets:
+        print(f"Warning: Failed to fetch data for {missing_assets}. Removing from asset list.")
+        assets = [a for a in assets if a in fetched_assets]
 
-    price_history = price_history.dropna(axis=1, how='all')
-    if price_history.empty:
-        print("Error: All asset price data is NaN.")
-        return
-    assets = [a for a in assets if a in price_history.columns]
+    # Real Data Audit #3 & #4: Fetch real funding, lending, and depth
+    print("Fetching real funding and lending series...")
+    stable_assets_ref = ["USDC", "USDT", "DAI"]
+    volatile_assets = [a for a in assets if a not in stable_assets_ref]
+    
+    funding_series = {}
+    for asset in volatile_assets:
+        try:
+            df_funding = fetch_funding_rates(asset, int(warmup_start.timestamp()), int(end_date.timestamp()))
+            if not df_funding.empty:
+                funding_series[asset] = df_funding["funding_rate"]
+        except Exception as e:
+            print(f"Warning: Could not fetch funding for {asset}: {e}")
 
-    benchmark = (price_history / price_history.iloc[0]).mean(axis=1) * initial_cash
+    lending_series = {}
+    for asset in stable_assets_ref:
+        if asset in assets:
+            try:
+                df_lending = fetch_lending_rates(asset, int(warmup_start.timestamp()), int(end_date.timestamp()))
+                if not df_lending.empty:
+                    lending_series[asset] = df_lending["lending_rate"]
+            except Exception as e:
+                print(f"Warning: Could not fetch lending for {asset}: {e}")
+
+    depth_by_asset = {}
+    for asset in assets:
+        if asset in volatile_assets:
+            try:
+                # Audit #5: Use 25bps depth for conservative slippage
+                book = fetcher.fetch_l2_depth_snapshot(asset)
+                depth_by_asset[asset] = book.get("depth_25bps_usd", 1_000_000)
+            except Exception:
+                depth_by_asset[asset] = 1_000_000
+        else:
+            # Stables have deep books, assume $20M for USDC/USDT/DAI
+            depth_by_asset[asset] = 20_000_000
+
+    yield_engine = YieldEngine(funding_series=funding_series, lending_series=lending_series)
+
+    # Split pre-warmup and simulation data
+    pre_warmup_prices = price_history[price_history.index < start_date]
+    sim_prices = price_history[price_history.index >= start_date]
+
+    # BUG-13: Benchmark is normalized price index
+    benchmark = (sim_prices[assets] / sim_prices[assets].iloc[0]).mean(axis=1) * initial_cash
     
     strategies = config.get('strategies', [{'name': 'Equal Weight'}])
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -114,10 +171,13 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
             end_date=end_date,
             assets=assets,
             circuit_breaker_config=cb_config,
-            strategy=strategy_obj
+            strategy=strategy_obj,
+            risk_free_rate=risk_free_rate,
+            yield_engine=yield_engine,
+            depth_by_asset=depth_by_asset
         )
-        sim.load_market_data(price_history)
-        sim.run()
+        sim.load_market_data(sim_prices)
+        sim.run(pre_warmup_data=pre_warmup_prices)
         
         history_df = pd.DataFrame(sim.history)
         if history_df.empty:
@@ -126,13 +186,15 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         history_df.set_index('timestamp', inplace=True)
         history_df.index = pd.to_datetime(history_df.index)
         
-        metrics = calculate_performance_metrics(history_df, risk_free_rate=sim_config.get('risk_free_rate', 0.05))
+        metrics = calculate_performance_metrics(history_df, risk_free_rate=risk_free_rate)
         attribution = decompose_returns(history_df, benchmark)
         
         print_simulation_summary(sim.history)
         print_performance_report(metrics, attribution)
         
         safe_name = strat_name.replace(" ", "_").lower()
+        
+        # BUG-09: unique chart filenames
         generate_nav_comparison(history_df, benchmark, output_dir=output_dir, filename=f"nav_comparison_{safe_name}.png")
         generate_drawdown_comparison(history_df, benchmark, output_dir=output_dir, filename=f"drawdown_comparison_{safe_name}.png")
         
@@ -151,20 +213,16 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
                 from risk_engine.monte_carlo import simulate_portfolio
                 from risk_engine.covariance import build_covariance
                 
-                # Get last state
                 final_val = history_df['portfolio_value'].iloc[-1]
                 final_weights = sim.portfolio.weights
                 
-                # Prepare returns for covariance
-                recent_returns = price_history.pct_change().tail(252).fillna(0)
+                recent_returns = sim_prices.pct_change().tail(252).fillna(0)
                 cov = build_covariance(recent_returns)
                 corr = np.corrcoef(recent_returns.values.T)
                 
-                # Simple expected returns from history
                 ann_returns = recent_returns.mean() * 252
                 vols = recent_returns.std() * np.sqrt(252)
                 
-                # Run MC
                 current_values = np.array([final_weights.get(a, 0.0) * final_val for a in assets])
                 mc_res = simulate_portfolio(
                     current_values=current_values,
@@ -172,7 +230,7 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
                     volatilities=vols.values,
                     correlation=corr,
                     horizon_days=90,
-                    n_simulations=10000 # Reduced for speed
+                    n_simulations=10000
                 )
                 
                 summary_data[strat_name]['monte_carlo'] = {
@@ -183,13 +241,9 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
                     'mean_return': mc_res.mean_return
                 }
                 print(f"[{strat_name}] Monte Carlo projection complete.")
-                print(f"[{strat_name}] 90-day Expected Return: {mc_res.mean_return:.2%}")
-                print(f"[{strat_name}] 90-day VaR 95%: ${mc_res.var_95:,.2f}")
                 
             except Exception as e:
                 print(f"[{strat_name}] Monte Carlo projection failed: {e}")
-                import traceback
-                traceback.print_exc()
                 
     summary_path = f"{output_dir}/summary.json"
     with open(summary_path, 'w') as f:

@@ -10,20 +10,12 @@ simulation:
   - BTC
   - ETH
   - USDC
-  - USDT
-  - SOL
   data_source: hyperliquid
   interval: 1h
-  end_date: '2026-05-24'
+  start_date: '2026-05-01'
+  end_date: '2026-05-05'
   initial_cash: 1000000.0
   risk_free_rate: 0.05
-  start_date: '2022-05-24'
 strategies:
 - name: Equal Weight
 - name: Risk Parity
-- name: Regime-Adaptive
-- name: Static Conservative
-  stablecoin_allocation_pct: 0.8
-  volatile_allocation_pct: 0.2
-- name: Min Variance
-- name: Black-Litterman

@@ -3,6 +3,11 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 import numpy as np
+import logging
+
+from backtest.engine.constants import MARKET_CAP_PRIORS, DEFAULT_RISK_AVERSION
+
+logger = logging.getLogger(__name__)
 
 _risk_engine_path = Path(__file__).resolve().parent.parent.parent / "python-risk"
 if str(_risk_engine_path) not in sys.path:
@@ -234,14 +239,26 @@ class BlackLittermanStrategy(AllocationStrategy):
         current_regime: str = "uncertain"
     ) -> Dict[str, float]:
         try:
-            from risk_engine.portfolio_optimizer import optimize_mean_variance
-            N = len(asset_names)
-            mu = np.array([expected_returns.get(name, 0.0) for name in asset_names])
-            bounds = [(0.0, 1.0) for _ in range(N)]
+            from risk_engine.portfolio_optimizer import optimize_black_litterman
+            from risk_engine.schemas import View
             
-            res = optimize_mean_variance(mu, covariance_matrix, bounds)
+            # Use CAPM equilibrium as prior
+            mkt_weights = np.array([MARKET_CAP_PRIORS.get(a, 0.01) for a in asset_names])
+            mkt_weights = mkt_weights / mkt_weights.sum()
+            
+            # For now, no specific views (P/Q), just equilibrium
+            # This can be expanded to inject analyst views
+            res = optimize_black_litterman(
+                covariance=covariance_matrix,
+                market_caps=mkt_weights,
+                views=[],
+                risk_aversion=getattr(self.config, 'risk_aversion', DEFAULT_RISK_AVERSION),
+                tau=getattr(self.config, 'tau', 0.05),
+                bounds=[(0.0, 1.0) for _ in asset_names]
+            )
             weights = {name: float(w) for name, w in zip(asset_names, res.weights)}
-        except Exception:
+        except Exception as e:
+            logger.error(f"BL optimization failed: {e}. Falling back to EW.")
             weights_arr = np.ones(len(asset_names)) / len(asset_names)
             weights = {name: float(w) for name, w in zip(asset_names, weights_arr)}
             

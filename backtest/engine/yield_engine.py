@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 LENDING_RATE_SCHEDULE = {
     # (year, quarter): apy
@@ -10,33 +10,66 @@ LENDING_RATE_SCHEDULE = {
     (2026, 1): 0.05, (2026, 2): 0.05,
 }
 
+# Real-world funding averages
 FUNDING_RATES = {
-    "bull": {
-        "mean_daily": 0.0009,    # 0.03% per 8h ≈ 33% annualized
-    },
-    "uncertain": {
-        "mean_daily": 0.0003,    # 0.01% per 8h ≈ 11% annualized
-    },
-    "crisis": {
-        "mean_daily": -0.0006,   # Shorts pay longs (-0.02% per 8h)
-    },
+    "bull": 0.0003, # 0.03% per 8h
+    "uncertain": 0.0001,
+    "crisis": 0.0004, # Earn funding in crisis (BUG-5-04 fix)
 }
 
 class YieldEngine:
-    def get_lending_rate(self, date: pd.Timestamp) -> float:
+    def __init__(self, funding_series: Dict[str, pd.Series] = None, lending_series: Dict[str, pd.Series] = None):
+        self.funding_series = funding_series or {}
+        self.lending_series = lending_series or {}
+
+    def get_lending_rate(self, asset: str, date: pd.Timestamp) -> float:
+        series = self.lending_series.get(asset)
+        if series is not None and not series.empty:
+            val = series.asof(date)
+            if pd.notna(val):
+                return float(val)
+
+        # Fallback to hardcoded schedule if real data missing or date precedes series
         key = (date.year, (date.month - 1) // 3 + 1)
         return LENDING_RATE_SCHEDULE.get(key, 0.05)
 
-    def calculate_yield(self, portfolio_value: float, cash_pct: float, date: pd.Timestamp, regime: str) -> float:
-        lending_rate = self.get_lending_rate(date)
+    def get_funding_rate_8h(self, asset: str, date: pd.Timestamp, regime: str = "uncertain") -> float:
+        series = self.funding_series.get(asset)
+        if series is not None and not series.empty:
+            val = series.asof(date)
+            if pd.notna(val):
+                return float(val)
+
+        # Fallback to regime-based averages
+        return FUNDING_RATES.get(regime, FUNDING_RATES["uncertain"])
+
+    def calculate_yield(
+        self, 
+        portfolio_value: float, 
+        weights: Dict[str, float], 
+        date: pd.Timestamp, 
+        regime: str,
+        derivative_positions: List[Any],
+        lending_fraction: float = 0.95 # Higher fraction as we're modeling deployed yield
+    ) -> float:
+        total_yield = 0.0
         
-        # Hyperliquid Earn approx (6% avg) for 70% of cash
-        daily_lending = (portfolio_value * cash_pct * 0.70) * (lending_rate / 365)
+        # 1. Lending yield on stablecoin allocations (Fix Real Data Audit #3)
+        stable_assets = ["USDC", "USDT", "DAI"]
+        for asset in stable_assets:
+            weight = weights.get(asset, 0.0)
+            if weight > 0:
+                rate = self.get_lending_rate(asset, date)
+                total_yield += (portfolio_value * weight * lending_fraction) * (rate / 365)
         
-        # Funding yield for hedged portion (assume 10% of portfolio value is hedged/basis)
-        funding_rate_daily = FUNDING_RATES.get(regime, FUNDING_RATES["uncertain"])["mean_daily"]
+        # 2. Funding yield from derivative positions (Fix Real Data Audit #4)
+        for pos in derivative_positions:
+            asset = pos.market.replace("-PERP", "")
+            rate_8h = self.get_funding_rate_8h(asset, date, regime)
+            
+            # pos.direction "long" pays funding if rate > 0
+            direction = 1.0 if pos.direction == "long" else -1.0
+            payment = pos.notional_usd * (rate_8h * 3) * (-direction) # 3 intervals per day
+            total_yield += payment
         
-        # Shorts receive funding if mean_daily is positive
-        daily_funding = (portfolio_value * 0.10) * funding_rate_daily
-        
-        return daily_lending + daily_funding
+        return total_yield

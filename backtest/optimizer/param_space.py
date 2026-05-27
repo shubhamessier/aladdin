@@ -55,4 +55,21 @@ PARAM_SPACE: list[ParamSpec] = [
     # ──── COVARIANCE & REGIME ────
     ParamSpec("covariance_lookback_days", "Rolling window for covariance", 252, 60, 504, 63, "int", "covariance"),
     ParamSpec("regime_fit_window_days", "Rolling window for HMM fitting", 504, 252, 756, 126, "int", "regime"),
+
+    # ──── EXECUTION (F2A) ────
+    ParamSpec("maker_fraction", "Fraction of trades as maker", 0.70, 0.30, 0.95, 0.05, category="execution"),
+    ParamSpec("emergency_taker_fee_bps", "Taker fee bps for CB events", 3.5, 2.0, 5.0, 0.5, category="execution"),
+    ParamSpec("slippage_depth_usd", "Assumed book depth for slippage", 5e6, 1e6, 50e6, 1e6, category="execution"),
+    
+    # ──── YIELD (F2A) ────
+    ParamSpec("basis_trade_pct", "Portfolio fraction in basis trades", 0.0, 0.0, 0.20, 0.02, category="yield"),
+    ParamSpec("lending_fraction_of_cash", "Fraction of cash lent out", 0.70, 0.40, 0.95, 0.05, category="yield"),
+    
+    # ──── REGIME (F2A) ────
+    ParamSpec("hmm_sticky_alpha", "HMM sticky prior strength", 10.0, 2.0, 30.0, 2.0, category="regime"),
+    ParamSpec("crisis_3step_threshold", "Crisis prob threshold for emergency", 0.30, 0.10, 0.70, 0.05, category="regime"),
+    
+    # ──── VOLATILITY SCALING (F2A) ────
+    ParamSpec("vol_target_annualized", "Target portfolio vol", 0.12, 0.06, 0.25, 0.01, category="vol_scaling"),
+    ParamSpec("vol_lookback_days", "Vol estimation window", 21, 10, 63, 5, "int", category="vol_scaling"),
 ]
