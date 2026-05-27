@@ -119,14 +119,22 @@ class RiskParityStrategy(AllocationStrategy):
                 
             stable_indices = [i for i, a in enumerate(asset_names) if a in ["USDC", "USDT", "DAI"]]
             tier_constraints = []
-            if stable_indices:
-                tier_constraints.append(TierConstraint(asset_indices=stable_indices, min_total=min_stable, max_total=1.0))
-            
             bounds = [(0.0, 0.35) for _ in asset_names]
             
+            if stable_indices:
+                tier_constraints.append(TierConstraint(asset_indices=stable_indices, min_total=min_stable, max_total=1.0))
+                # Make stable floor feasible if 0.35 * num_stables < min_stable
+                stable_bound_min = min_stable / max(len(stable_indices), 1)
+                for idx in stable_indices:
+                    bounds[idx] = (0.0, max(0.35, stable_bound_min))
+            
             res = optimize_risk_parity(covariance_matrix, bounds, tier_constraints)
+            if not res.converged:
+                logger.warning(f"Risk parity optimizer failed to converge: {res.method}")
+                raise RuntimeError("Optimizer non-convergence")
             weights = {name: float(w) for name, w in zip(asset_names, res.weights)}
-        except Exception:
+        except Exception as e:
+            logger.error(f"Risk parity optimization failed: {e}. Falling back to inverse-vol.")
             vols = np.sqrt(np.diag(covariance_matrix))
             inv_vols = 1.0 / np.maximum(vols, 1e-6)
             weights_arr = inv_vols / np.sum(inv_vols)
@@ -219,8 +227,12 @@ class MinVarianceStrategy(AllocationStrategy):
             bounds = [(0.0, 1.0) for _ in range(N)]
             
             res = optimize_mean_variance(expected_zeros, covariance_matrix, bounds)
+            if not res.converged:
+                logger.warning(f"Min variance optimizer failed to converge: {res.method}")
+                raise RuntimeError("Optimizer non-convergence")
             weights = {name: float(w) for name, w in zip(asset_names, res.weights)}
-        except Exception:
+        except Exception as e:
+            logger.error(f"Min variance optimization failed: {e}. Falling back to inverse-vol.")
             vols = np.sqrt(np.diag(covariance_matrix))
             inv_vols = 1.0 / np.maximum(vols, 1e-6)
             weights_arr = inv_vols / np.sum(inv_vols)
@@ -256,6 +268,9 @@ class BlackLittermanStrategy(AllocationStrategy):
                 tau=getattr(self.config, 'tau', 0.05),
                 bounds=[(0.0, 1.0) for _ in asset_names]
             )
+            if not res.converged:
+                logger.warning(f"Black-Litterman optimizer failed to converge: {res.method}")
+                raise RuntimeError("Optimizer non-convergence")
             weights = {name: float(w) for name, w in zip(asset_names, res.weights)}
         except Exception as e:
             logger.error(f"BL optimization failed: {e}. Falling back to EW.")

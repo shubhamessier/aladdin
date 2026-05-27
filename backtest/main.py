@@ -277,8 +277,8 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
                 current_values = np.array([final_weights.get(a, 0.0) * final_val for a in assets])
                 mc_res = simulate_portfolio(
                     current_values=current_values,
-                    expected_returns=ann_returns.values,
-                    volatilities=vols.values,
+                    annualized_returns=ann_returns.values,
+                    annualized_volatilities=vols.values,
                     correlation=corr,
                     horizon_days=90,
                     n_simulations=10000

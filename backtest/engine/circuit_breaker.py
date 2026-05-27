@@ -99,12 +99,26 @@ class CircuitBreaker:
         self.last_peak_time: Optional[datetime] = None
         self.cb_no_further_drop_since: Optional[datetime] = None
         self.level_set_time: Optional[datetime] = None
+        self.hwm_candidate: float = 0.0
+        self.hwm_candidate_time: Optional[datetime] = None
 
     def update(self, current_time: datetime, current_value: float, rolling_vol: float, avg_vol: float) -> int:
-        if self.hwm_absolute == 0 or current_value > self.hwm_absolute:
+        if self.hwm_absolute == 0:
             self.hwm_absolute = current_value
             self.last_peak_time = current_time
             self.cb_no_further_drop_since = current_time
+            
+        if current_value > self.hwm_absolute:
+            if current_value > self.hwm_candidate:
+                self.hwm_candidate = current_value
+                self.hwm_candidate_time = current_time
+            elif self.hwm_candidate_time and (current_time - self.hwm_candidate_time).total_seconds() >= 86400:
+                self.hwm_absolute = self.hwm_candidate
+                self.last_peak_time = current_time
+                self.cb_no_further_drop_since = current_time
+        else:
+            self.hwm_candidate = 0.0
+            self.hwm_candidate_time = None
             
         days_since_hwm = (current_time - self.last_peak_time).days if self.last_peak_time else 0
         eff_hwm = compute_effective_hwm(self.hwm_absolute, current_value, days_since_hwm, self.config.hwm_decay_halflife_days)

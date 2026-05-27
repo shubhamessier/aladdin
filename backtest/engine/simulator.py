@@ -223,13 +223,12 @@ class TreasurySimulator:
         if self.recovery.is_active:
             self.recovery.update_peak(self.portfolio.portfolio_value)
             days_in = (pd.Timestamp(date) - self.recovery.entry_date).days
+            self.recovery.weeks_in_recovery = days_in // 7
+
             if days_in >= 49:
                 self.recovery.exit()
-            elif days_in > 0 and days_in % 7 == 0:
-                self.recovery.advance_week()
-            
-            if self.recovery.check_further_decline(self.portfolio.portfolio_value):
-                self.recovery.reset_recovery()
+
+            if self.recovery.check_further_decline(self.portfolio.portfolio_value):                self.recovery.reset_recovery()
                 self.cb.current_level = 2
                 current_cb_level = 2
 

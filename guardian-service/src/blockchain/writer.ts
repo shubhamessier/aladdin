@@ -78,6 +78,24 @@ const config = {
 export class TransactionManager {
     private nonceTracker: Map<string, number> = new Map();
     private pendingTxs: Map<string, PendingTransaction> = new Map();
+    private nonceMutex = false;
+
+    private async getNextNonce(address: string): Promise<number> {
+        while (this.nonceMutex) {
+            await new Promise(r => setTimeout(r, 50));
+        }
+        this.nonceMutex = true;
+        try {
+            let nonce = this.nonceTracker.get(address);
+            if (nonce === undefined) {
+                nonce = await provider.getTransactionCount(address, 'pending');
+            }
+            this.nonceTracker.set(address, nonce + 1);
+            return nonce;
+        } finally {
+            this.nonceMutex = false;
+        }
+    }
 
     private async getSigner() {
         return signer;
@@ -93,12 +111,8 @@ export class TransactionManager {
         const currentSigner = await this.getSigner();
         const address = await currentSigner.getAddress();
 
-        // 1. Get nonce
-        let nonce = this.nonceTracker.get(address);
-        if (nonce === undefined) {
-            nonce = await provider.getTransactionCount(address, 'pending');
-            this.nonceTracker.set(address, nonce);
-        }
+        // 1. Get nonce safely
+        const nonce = await this.getNextNonce(address);
 
         // 2. Estimate gas with buffer
         let gasLimit = params.gasLimit;
@@ -118,9 +132,22 @@ export class TransactionManager {
         const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas ? feeData.maxPriorityFeePerGas * 110n / 100n : 1000000000n;
 
         // 4. Check gas price against guardian's max threshold
-        if (maxFeePerGas > BigInt(config.maxGasPriceWei)) {
-            logger.warn({ maxFeePerGas: maxFeePerGas.toString(), threshold: config.maxGasPriceWei, msg: 'Gas price above threshold — deferring tx' });
-            throw new GasPriceTooHighError(maxFeePerGas, BigInt(config.maxGasPriceWei));
+        // Attempt to fetch dynamically from on-chain truth
+        let maxGasPrice = BigInt(config.maxGasPriceWei);
+        try {
+            const vaultAddress = process.env.VAULT_ADDRESS || params.to;
+            const result = await provider.call({ to: vaultAddress, data: '0xef3881c8' }, 'latest' as any);
+            const onChainMaxGasPrice = BigInt(result);
+            if (onChainMaxGasPrice > 0n) {
+                maxGasPrice = onChainMaxGasPrice;
+            }
+        } catch (e) {
+            logger.warn({ msg: 'Failed to fetch on-chain maxGasPriceWei, using fallback' });
+        }
+
+        if (maxFeePerGas > maxGasPrice) {
+            logger.warn({ maxFeePerGas: maxFeePerGas.toString(), threshold: maxGasPrice.toString(), msg: 'Gas price above threshold — deferring tx' });
+            throw new GasPriceTooHighError(maxFeePerGas, maxGasPrice);
         }
 
         const originalParams = {
@@ -137,7 +164,6 @@ export class TransactionManager {
         // 5. Send
         const tx = await currentSigner.sendTransaction(originalParams);
 
-        this.nonceTracker.set(address, nonce + 1);
         this.pendingTxs.set(tx.hash, {
             hash: tx.hash,
             nonce,

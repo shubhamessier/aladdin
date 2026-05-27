@@ -4,8 +4,8 @@ from .covariance import nearest_psd
 
 def simulate_portfolio(
     current_values: np.ndarray,     # Current USD value per asset
-    expected_returns: np.ndarray,   # Daily expected returns (annualized / 252)
-    volatilities: np.ndarray,       # Daily vols from GARCH
+    annualized_returns: np.ndarray, # Annualized expected returns
+    annualized_volatilities: np.ndarray, # Annualized volatilities
     correlation: np.ndarray,        # Correlation matrix
     horizon_days: int = 30,
     n_simulations: int = 50_000,
@@ -29,8 +29,8 @@ def simulate_portfolio(
         L = np.linalg.cholesky(correlation)
     
     # Daily returns for each asset
-    daily_mu = expected_returns / 252.0
-    daily_sigma = volatilities / np.sqrt(252.0)
+    daily_mu = annualized_returns / 252.0
+    daily_sigma = annualized_volatilities / np.sqrt(252.0)
     
     # Simulate
     # Shape: (n_simulations, horizon_days, N)
@@ -43,9 +43,10 @@ def simulate_portfolio(
         # Generate correlated innovations
         if use_student_t:
             # Student-t: Z = sqrt(df / chi2(df)) * Normal
+            # Multiply by sqrt((df-2)/df) to give it unit variance
             z_normal = rng.standard_normal((n_simulations, N))
             chi2_samples = rng.chisquare(df, size=(n_simulations, 1))
-            z = z_normal * np.sqrt(df / chi2_samples)  # Fat-tailed innovations
+            z = z_normal * np.sqrt(df / chi2_samples) * np.sqrt((df - 2.0) / df)
         else:
             z = rng.standard_normal((n_simulations, N))
         

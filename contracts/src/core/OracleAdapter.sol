@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IOracleAdapter} from "../interfaces/IOracleAdapter.sol";
 import {IAssetRegistry} from "../interfaces/IAssetRegistry.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Oracle__NoSourcesAvailable, Oracle__AllSourcesStale, Oracle__PriceSuspect, Oracle__PendingConfirmation, Oracle__InvalidFeed, Oracle__ZeroPrice} from "../errors/OracleErrors.sol";
 
 interface IPyth {
@@ -61,6 +62,8 @@ contract OracleAdapter is IOracleAdapter {
     }
     
     function setFeeds(address token, address chainlinkFeed, address pythContract, bytes32 pythFeedId) external {
+        bytes32 GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
+        require(IAccessControl(address(assetRegistry)).hasRole(GOVERNOR_ROLE, msg.sender), "OracleAdapter: unauthorized");
         chainlinkFeeds[token] = chainlinkFeed;
         pythAddress[token] = pythContract;
         pythFeeds[token] = pythFeedId;
@@ -230,15 +233,21 @@ contract OracleAdapter is IOracleAdapter {
         // Real logic is in resolvePrice. getPrice just falls back to view-only TWAP/lastGood
         TokenState storage state = _states[token];
         uint256 twap = _calculateTWAP(state.twapBuffer, state.twapCount);
+        
+        PriceStatus status = PriceStatus.GOOD;
+        if (state.lastGoodPrice == 0 || block.timestamp - state.lastTwapUpdate > MAX_STALENESS_SECONDS) {
+            status = PriceStatus.STALE;
+        }
+        
         return PriceData({
             price: state.lastGoodPrice, 
             tokenDecimals: 18,
-            status: PriceStatus.GOOD,
+            status: status,
             timestamp: state.lastTwapUpdate,
             numActiveSources: 1,
             maxDeviation: 0, 
             twap: twap,
-            confidence: 10000
+            confidence: status == PriceStatus.GOOD ? 10000 : 0
         });
     }
 

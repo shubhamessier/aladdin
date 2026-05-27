@@ -49,8 +49,12 @@ class OptimizationObjectives:
         calmar_score = (np.clip(self.calmar_ratio, -1, 3) + 1) / 4 * 100
         score += weights["calmar"] * calmar_score
         
-        # Penalty: Max drawdown (0% DD = 100 score, 50% DD = 0 score)
-        dd_score = max(0, 100 * (1 - self.max_drawdown_pct / 0.50))
+        # Investability floor
+        if self.total_return_pct < 0:
+            return 0.0
+            
+        # Convex Penalty: Max drawdown (punish high DD exponentially)
+        dd_score = max(0, 100 * (1 - (self.max_drawdown_pct / 0.40) ** 2))
         score += weights["max_dd_penalty"] * dd_score
         
         # Penalty: Volatility (0% vol = 100, 50% vol = 0)
@@ -69,12 +73,12 @@ class OptimizationObjectives:
 
     def passes_hard_constraints(self) -> Tuple[bool, str]:
         """Hard constraints for treasury safety."""
-        if self.max_drawdown_pct > 0.40:
-            return False, f"Max drawdown {self.max_drawdown_pct:.1%} > 40%"
-        if self.annualized_volatility > 0.30:
-            return False, f"Volatility {self.annualized_volatility:.1%} > 30%"
-        if self.total_return_pct < -30:
-            return False, f"Total return {self.total_return_pct:.1f}% < -30%"
+        if self.max_drawdown_pct > 0.30:
+            return False, f"Max drawdown {self.max_drawdown_pct:.1%} > 30%"
+        if self.annualized_volatility > 0.25:
+            return False, f"Volatility {self.annualized_volatility:.1%} > 25%"
+        if self.total_return_pct < 0:
+            return False, f"Total return {self.total_return_pct:.1f}% < 0%"
         if self.cost_drag_annual_pct > 0.05:
             return False, f"Cost drag {self.cost_drag_annual_pct:.2%} > 5%"
         return True, "Passes"

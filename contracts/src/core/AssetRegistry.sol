@@ -2,11 +2,16 @@
 pragma solidity ^0.8.24;
 
 import {IAssetRegistry} from "../interfaces/IAssetRegistry.sol";
+import {ITreasuryVault} from "../interfaces/ITreasuryVault.sol";
+import {IOracleAdapter} from "../interfaces/IOracleAdapter.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 contract AssetRegistry is IAssetRegistry, AccessControl {
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+
+    ITreasuryVault public vault;
+    IOracleAdapter public oracle;
 
     mapping(address => AssetConfig) private _assets;
     mapping(RiskTier => TierConfig) private _tierConfigs;
@@ -93,11 +98,66 @@ contract AssetRegistry is IAssetRegistry, AccessControl {
         return _tierConfigs[tier];
     }
 
+    function setDependencies(address _vault, address _oracle) external onlyRole(GOVERNOR_ROLE) {
+        vault = ITreasuryVault(_vault);
+        oracle = IOracleAdapter(_oracle);
+    }
+
     function getPortfolioSnapshot() external view override returns (SnapshotData memory) {
-        AssetSnapshot[] memory assets = new AssetSnapshot[](0);
+        if (address(vault) == address(0) || address(oracle) == address(0)) {
+            return SnapshotData({
+                assets: new AssetSnapshot[](0),
+                totalPortfolioUSD: 0
+            });
+        }
+
+        uint256 activeCount = 0;
+        for (uint256 i = 0; i < _activeTokens.length; i++) {
+            if (_assets[_activeTokens[i]].isActive) {
+                activeCount++;
+            }
+        }
+
+        AssetSnapshot[] memory assets = new AssetSnapshot[](activeCount);
+        uint256 totalUSD = 0;
+        uint256 idx = 0;
+
+        for (uint256 i = 0; i < _activeTokens.length; i++) {
+            address token = _activeTokens[i];
+            AssetConfig memory config = _assets[token];
+            
+            if (!config.isActive) continue;
+
+            ITreasuryVault.AssetLedger memory ledger = vault.getAssetLedger(token);
+            IOracleAdapter.PriceData memory priceData = oracle.getPrice(token);
+            
+            uint256 valUSD = 0;
+            if (config.decimals > 0 && priceData.price > 0) {
+                // valUSD in 18 decimals. price is 18 decimals. balance is in config.decimals.
+                valUSD = (ledger.freeBalance * priceData.price) / (10 ** config.decimals);
+            }
+            
+            assets[idx] = AssetSnapshot({
+                token: token,
+                balance: ledger.freeBalance,
+                valueUSD: valUSD,
+                allocationBps: 0,
+                tier: config.tier,
+                liquidityScore: config.liquidityScore
+            });
+            totalUSD += valUSD;
+            idx++;
+        }
+
+        if (totalUSD > 0) {
+            for (uint256 i = 0; i < activeCount; i++) {
+                assets[i].allocationBps = (assets[i].valueUSD * 10000) / totalUSD;
+            }
+        }
+
         return SnapshotData({
             assets: assets,
-            totalPortfolioUSD: 0
+            totalPortfolioUSD: totalUSD
         });
     }
 

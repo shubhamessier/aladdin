@@ -115,6 +115,12 @@ interface ITreasuryVault {
     function withdraw(address token, uint256 amount) external returns (uint256 requestId);
 
     /**
+     * @notice Claims a queued withdrawal after the timelock has expired.
+     * @param requestId The ID of the withdrawal request.
+     */
+    function claimWithdrawal(uint256 requestId) external;
+
+    /**
      * @notice Executes a swap through a whitelisted DEX router.
      * @param tokenIn The address of the input token.
      * @param tokenOut The address of the output token.
@@ -160,6 +166,11 @@ interface ITreasuryVault {
      * @return The CB level (0 = HEALTHY).
      */
     function currentCBLevel() external view returns (uint8);
+
+    function maxDailyVolumeUSD() external view returns (uint256);
+    function maxTradeUSD() external view returns (uint256);
+    function maxGasPriceWei() external view returns (uint256);
+    function maxSlippageBps() external view returns (uint256);
 
     /**
      * @notice Retrieves the portfolio high water mark in USD.

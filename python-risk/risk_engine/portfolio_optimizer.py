@@ -174,7 +174,7 @@ def optimize_black_litterman(
         Q[i] = view.expected_return
         
         if view.confidence is not None:
-            omega_diag[i] = ((1.0 / max(view.confidence, 0.01)) - 1.0) * float(P[i] @ (tau * covariance) @ P[i].T)
+            omega_diag[i] = ((1.0 / max(view.confidence, 0.01)) - 1.0) * float(P[i] @ covariance @ P[i].T)
         else:
             omega_diag[i] = float(P[i] @ (tau * covariance) @ P[i].T)
     

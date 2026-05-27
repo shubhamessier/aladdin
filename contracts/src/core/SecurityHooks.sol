@@ -15,9 +15,6 @@ contract SecurityHooks is ISecurityHooks {
 
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
-    uint256 public constant MAX_SLIPPAGE_BPS = 100;
-    uint256 public constant MAX_TRADE_USD = 500_000e18; // $500k
-    uint256 public constant MAX_DAILY_VOLUME_USD = 2_000_000e18; // $2M
     uint256 public constant MIN_TRADE_COOLDOWN_SECONDS = 30;
     
     uint256 public maxGrossNotionalBps = 5000;
@@ -79,7 +76,7 @@ contract SecurityHooks is ISecurityHooks {
         }
 
         // Rule 10: Gas Price
-        if (tx.gasprice > 100 gwei) {
+        if (vault.maxGasPriceWei() > 0 && tx.gasprice > vault.maxGasPriceWei()) {
             return ValidationResult(false, "Rule 10: Gas price too high", 1);
         }
 
@@ -96,7 +93,7 @@ contract SecurityHooks is ISecurityHooks {
 
             // Rule 4: Trade Size Limits
             uint256 tradeUsd = (params.amountIn * priceIn) / 1e18; // assuming 18 decimals internal pricing
-            if (tradeUsd > MAX_TRADE_USD) {
+            if (tradeUsd > vault.maxTradeUSD()) {
                 return ValidationResult(false, "Rule 4: Exceeds max trade USD", 1);
             }
 
@@ -104,7 +101,7 @@ contract SecurityHooks is ISecurityHooks {
             if (block.timestamp > dailyVolumeResetTimestamp + 1 days) {
                 currentDailyVol = 0;
             }
-            if (currentDailyVol + tradeUsd > MAX_DAILY_VOLUME_USD) {
+            if (currentDailyVol + tradeUsd > vault.maxDailyVolumeUSD()) {
                 return ValidationResult(false, "Rule 4: Exceeds daily volume", 1);
             }
 

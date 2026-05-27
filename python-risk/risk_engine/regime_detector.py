@@ -7,22 +7,6 @@ from scipy.stats import norm, rankdata  # type: ignore
 from typing import Dict, Any, List, Optional
 from .schemas import RegimePrediction
 
-def inverse_normal_transform(returns: pd.Series) -> pd.Series:
-    """
-    Rank-based inverse normal transformation.
-    Maps arbitrary distribution to N(0,1) while preserving temporal ordering.
-    """
-    n = len(returns)
-    if n == 0:
-        return returns
-    ranks = rankdata(returns, method="average")
-    # Blom's formula: Phi^{-1}((rank - 3/8) / (n + 1/4))
-    uniform = (ranks - 0.375) / (n + 0.25)
-    # Clip to avoid infinite values at tails
-    uniform = np.clip(uniform, 0.001, 0.999)
-    transformed = norm.ppf(uniform)
-    return pd.Series(transformed, index=returns.index)
-
 class RobustRegimeDetector:
     """
     Regime detector with Student-t robustness and sticky transition priors.
@@ -46,6 +30,31 @@ class RobustRegimeDetector:
         self.state_map: Dict[int, str] = {}
         self.fitted = False
         self._raw_returns: Optional[pd.Series] = None
+        self._sorted_returns: Optional[np.ndarray] = None
+
+    def _transform(self, returns: pd.Series, is_fit: bool = False) -> pd.Series:
+        if not self.transform_returns:
+            return returns
+        n = len(returns)
+        if n == 0:
+            return returns
+            
+        if is_fit:
+            self._sorted_returns = np.sort(returns.values)
+            ranks = rankdata(returns, method="average")
+            n_denom = len(self._sorted_returns)
+        else:
+            if self._sorted_returns is None:
+                ranks = rankdata(returns, method="average")
+                n_denom = n
+            else:
+                ranks = np.searchsorted(self._sorted_returns, returns.values)
+                n_denom = len(self._sorted_returns)
+                
+        uniform = (ranks - 0.375) / (n_denom + 0.25)
+        uniform = np.clip(uniform, 0.001, 0.999)
+        transformed = norm.ppf(uniform)
+        return pd.Series(transformed, index=returns.index)
 
     def fit(self, returns: pd.Series) -> bool:
         returns = returns.dropna()
@@ -53,7 +62,7 @@ class RobustRegimeDetector:
             return False
 
         self._raw_returns = returns
-        transformed = inverse_normal_transform(returns) if self.transform_returns else returns
+        transformed = self._transform(returns, is_fit=True)
         X = transformed.values.reshape(-1, 1)
         if np.any(np.isnan(X)) or np.any(np.isinf(X)):
             return False
@@ -122,7 +131,7 @@ class RobustRegimeDetector:
         if not self.fitted or self.model is None:
             return RegimePrediction(current_regime="uncertain", confidence=0.5, crisis_probability_3step=0.1, regime_probabilities={}, transition_probabilities={})
         
-        transformed = inverse_normal_transform(returns) if self.transform_returns else returns
+        transformed = self._transform(returns, is_fit=False)
         X = transformed.values.reshape(-1, 1)
         
         try:

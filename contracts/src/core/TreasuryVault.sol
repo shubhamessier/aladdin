@@ -116,9 +116,10 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         $.maxSlippageBps = 100;
         $.maxTradeUSD = 500_000e18;
         $.maxDailyVolumeUSD = 2_000_000e18;
+        $.maxGasPriceWei = 100_000_000_000; // 100 gwei
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(keccak256("TIMELOCK_ROLE")) {}
 
     function deposit(address token, uint256 amount) external nonReentrant {
         TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
@@ -133,6 +134,8 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         $.assetLedgers[token].freeBalance += actualAmount;
         $.assetLedgers[token].cumulativeDeposits += actualAmount;
         $.assetLedgers[token].lastUpdatedBlock = block.number;
+        
+        _updatePortfolioSnapshot();
     }
 
     function withdraw(address token, uint256 amount) external nonReentrant returns (uint256 requestId) {
@@ -140,12 +143,77 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         if($.paused) revert Vault__Paused();
         if($.assetLedgers[token].freeBalance < amount) revert Vault__InsufficientBalance(token, amount, $.assetLedgers[token].freeBalance);
         
+        ISecurityHooks.ActionParams memory params = ISecurityHooks.ActionParams({
+            actionType: ISecurityHooks.ActionType.WITHDRAWAL,
+            caller: msg.sender,
+            tokenIn: address(0),
+            tokenOut: token,
+            amountIn: 0,
+            amountOut: amount,
+            minAmountOut: amount,
+            strategy: address(0),
+            market: address(0),
+            isLong: false,
+            derivativeSize: 0,
+            additionalData: ""
+        });
+        
+        ISecurityHooks.ValidationResult memory res = $.securityHooks.validate(params);
+        if(!res.allowed) revert(res.reason);
+
+        IOracleAdapter.PriceData memory priceData = $.oracleAdapter.getPrice(token);
+        IAssetRegistry.AssetConfig memory config = $.assetRegistry.getAssetConfig(token);
+        
+        uint256 valUSD = 0;
+        if (config.decimals > 0 && priceData.price > 0) {
+            valUSD = (amount * priceData.price) / (10 ** config.decimals);
+        }
+
+        if ($.largeWithdrawalThreshold > 0 && valUSD > $.largeWithdrawalThreshold) {
+            uint256 id = ++$.nextWithdrawalId;
+            $.withdrawalQueue[id] = WithdrawalRequest({
+                depositor: msg.sender,
+                token: token,
+                amount: amount,
+                unlockTimestamp: block.timestamp + $.withdrawalTimelockSeconds,
+                isExecuted: false,
+                isCancelled: false
+            });
+            $.assetLedgers[token].pendingWithdrawals += amount;
+            $.assetLedgers[token].freeBalance -= amount; // Lock the funds
+            $.securityHooks.recordAction(params);
+            _updatePortfolioSnapshot();
+            return id;
+        }
+        
         $.assetLedgers[token].freeBalance -= amount;
         $.assetLedgers[token].cumulativeWithdrawals += amount;
         $.assetLedgers[token].lastUpdatedBlock = block.number;
+
+        $.securityHooks.recordAction(params);
+        _updatePortfolioSnapshot();
         
         IERC20(token).safeTransfer(msg.sender, amount);
         return 0; // Immediate execution
+    }
+
+    function claimWithdrawal(uint256 requestId) external nonReentrant {
+        TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
+        if($.paused) revert Vault__Paused();
+        
+        WithdrawalRequest storage req = $.withdrawalQueue[requestId];
+        require(req.depositor == msg.sender, "Vault__NotOwner");
+        require(!req.isExecuted, "Vault__AlreadyExecuted");
+        require(!req.isCancelled, "Vault__Cancelled");
+        require(block.timestamp >= req.unlockTimestamp, "Vault__Timelocked");
+        
+        req.isExecuted = true;
+        
+        $.assetLedgers[req.token].pendingWithdrawals -= req.amount;
+        $.assetLedgers[req.token].cumulativeWithdrawals += req.amount;
+        $.assetLedgers[req.token].lastUpdatedBlock = block.number;
+        
+        IERC20(req.token).safeTransfer(msg.sender, req.amount);
     }
 
     function executeSwap(
@@ -167,7 +235,7 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         // Extract router from routeData (assuming first 20 bytes is router address for simplicity or it's a fixed router config)
         // Here we mock a call, but normally we'd decode router
         address router = address(bytes20(routeData[0:20])); 
-        // require($.whitelistedRouters[router], "Vault__NotWhitelisted"); // ignoring for mock
+        require($.whitelistedRouters[router], "Vault__NotWhitelisted");
 
         ISecurityHooks.ActionParams memory params = ISecurityHooks.ActionParams({
             actionType: ISecurityHooks.ActionType.SWAP,
@@ -195,6 +263,9 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         IERC20(tokenIn).safeIncreaseAllowance(router, amountIn);
         
         (bool success, bytes memory returnData) = router.call(routeData[20:]);
+        
+        IERC20(tokenIn).forceApprove(router, 0);
+
         if (!success) {
             bytes4 selector = 0;
             if (routeData.length >= 24) selector = bytes4(routeData[20:24]);
@@ -218,6 +289,7 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         $.assetLedgers[tokenOut].lastUpdatedBlock = block.number;
 
         $.securityHooks.recordAction(params);
+        _updatePortfolioSnapshot();
         
         return actualAmountOut;
     }
@@ -248,6 +320,8 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
             if(!res.allowed) revert Vault__BatchActionFailed(i, bytes(res.reason));
 
             if(params.actionType == ISecurityHooks.ActionType.SWAP) {
+                require($.whitelistedRouters[a.target], "Vault__NotWhitelisted");
+                
                 // Pre-swap balances
                 uint256 balInBefore = IERC20(a.tokenIn).balanceOf(address(this));
                 uint256 balOutBefore = IERC20(a.tokenOut).balanceOf(address(this));
@@ -255,6 +329,9 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
                 IERC20(a.tokenIn).safeIncreaseAllowance(a.target, a.amountIn);
                 
                 (bool success, bytes memory returnData) = a.target.call(a.data);
+                
+                IERC20(a.tokenIn).forceApprove(a.target, 0);
+
                 if (!success) {
                     revert Vault__BatchActionFailed(i, returnData);
                 }
@@ -279,7 +356,11 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         _updatePortfolioSnapshot();
     }
 
-    function _updatePortfolioSnapshot() public onlyRole(KEEPER_ROLE) {
+    function updatePortfolioSnapshot() external onlyRole(KEEPER_ROLE) {
+        _updatePortfolioSnapshot();
+    }
+
+    function _updatePortfolioSnapshot() internal {
         TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
         IAssetRegistry.SnapshotData memory data = $.assetRegistry.getPortfolioSnapshot();
         
@@ -328,7 +409,7 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
             $.hwmAbsolute = data.totalPortfolioUSD;
             $.hwmLastUpdatedTimestamp = block.timestamp;
         }
-        $.hwmEffective = _computeEffectiveHWM();
+        $.hwmEffective = _computeEffectiveHWM(data.totalPortfolioUSD);
         
         if(data.totalPortfolioUSD < $.cbNoFurtherDropSince || $.cbNoFurtherDropSince == 0) {
             $.cbNoFurtherDropSince = data.totalPortfolioUSD;
@@ -340,30 +421,50 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         _checkCircuitBreaker(data.totalPortfolioUSD);
     }
 
-    function _computeEffectiveHWM() internal view returns (uint256) {
+    function _computeEffectiveHWM(uint256 currentValue) internal view returns (uint256) {
         TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
-        if ($.hwmAbsolute == 0) return 0;
+        if ($.hwmAbsolute == 0 || currentValue >= $.hwmAbsolute) return currentValue;
+        
         uint256 elapsed = block.timestamp - $.hwmLastUpdatedTimestamp;
-        if (elapsed == 0) return $.hwmAbsolute;
-        
-        uint256 halflives = elapsed / $.hwmDecayHalflifeSeconds;
-        if (halflives >= 64) return 0; 
-        
-        uint256 decayedValue = $.hwmAbsolute >> halflives;
-        uint256 remainder = elapsed % $.hwmDecayHalflifeSeconds;
-        if (remainder > 0) {
-            decayedValue = decayedValue - (decayedValue * remainder) / (2 * $.hwmDecayHalflifeSeconds);
+        uint256 gracePeriod = 30 days;
+        if (elapsed <= gracePeriod) {
+            return $.hwmAbsolute;
         }
-        return decayedValue;
+        
+        uint256 decayElapsed = elapsed - gracePeriod;
+        uint256 gap = $.hwmAbsolute - currentValue;
+        
+        uint256 halflives = decayElapsed / $.hwmDecayHalflifeSeconds;
+        if (halflives >= 64) return currentValue; 
+        
+        uint256 decayedGap = gap >> halflives;
+        uint256 remainder = decayElapsed % $.hwmDecayHalflifeSeconds;
+        if (remainder > 0) {
+            decayedGap = decayedGap - (decayedGap * remainder) / (2 * $.hwmDecayHalflifeSeconds);
+        }
+        
+        return currentValue + decayedGap;
     }
 
     function decayCBLevel() external onlyRole(GUARDIAN_ROLE) {
         TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
         if ($.currentCBLevel == 0) return;
-        if (block.timestamp < $.cbLevelSetTimestamp + 1 days) revert Vault__CBDecayTooSoon();
+        
+        uint256 daysSinceActivated = (block.timestamp - $.cbActivatedAt) / 1 days;
+        if (daysSinceActivated >= 60) {
+            $.currentCBLevel = 0;
+            $.cbLevelSetTimestamp = block.timestamp;
+            return;
+        }
+
+        uint256 requiredDays = 7;
+        if ($.currentCBLevel == 2) requiredDays = 14;
+        
+        if ($.cbConsecutiveStableDays < requiredDays) revert Vault__CBDecayTooSoon();
         
         $.currentCBLevel--;
         $.cbLevelSetTimestamp = block.timestamp;
+        $.cbConsecutiveStableDays = 0;
     }
 
     function _checkCircuitBreaker(uint256 currentValue) internal {
@@ -466,10 +567,34 @@ contract TreasuryVault is Initializable, UUPSUpgradeable, AccessControlUpgradeab
         return _getTreasuryVaultStorage().portfolioHighWaterMark;
     }
 
+    function maxDailyVolumeUSD() external view override returns (uint256) {
+        return _getTreasuryVaultStorage().maxDailyVolumeUSD;
+    }
+
+    function maxTradeUSD() external view override returns (uint256) {
+        return _getTreasuryVaultStorage().maxTradeUSD;
+    }
+
+    function maxGasPriceWei() external view override returns (uint256) {
+        return _getTreasuryVaultStorage().maxGasPriceWei;
+    }
+
+    function maxSlippageBps() external view override returns (uint256) {
+        return _getTreasuryVaultStorage().maxSlippageBps;
+    }
+
     // Admin configuration
     function whitelistToken(address token, bool isWhitelisted) external onlyRole(GOVERNOR_ROLE) {
         TreasuryVaultStorage storage $ = _getTreasuryVaultStorage();
         $.whitelistedTokens[token] = isWhitelisted;
+    }
+
+    function pause() external onlyRole(keccak256("EMERGENCY_ROLE")) {
+        _getTreasuryVaultStorage().paused = true;
+    }
+
+    function unpause() external onlyRole(GOVERNOR_ROLE) {
+        _getTreasuryVaultStorage().paused = false;
     }
 
     function getAssetLedger(address token) external view returns (AssetLedger memory) {

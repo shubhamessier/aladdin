@@ -5,8 +5,9 @@ from typing import Tuple, Any, cast
 
 def cov_to_corr(cov: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Convert covariance matrix to correlation matrix and standard deviations."""
-    std = np.sqrt(np.diag(cov))
-    corr = cov / np.outer(std, std)
+    std = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    safe_std = np.maximum(std, 1e-12)
+    corr = cov / np.outer(safe_std, safe_std)
     corr[corr > 1] = 1
     corr[corr < -1] = -1
     return corr, std
@@ -57,30 +58,18 @@ def build_covariance(returns: pd.DataFrame, ewma_halflife: int = 63) -> np.ndarr
     """
     Robust covariance pipeline:
     1. EWMA
-    2. Ledoit-Wolf Shrinkage
-    3. RMT De-noising
-    4. Nearest PSD
+    2. RMT De-noising
+    3. Nearest PSD
     """
     t, n = returns.shape
     
-    # 1. EWMA Covariance — captures recent volatility clustering
+    # 1. EWMA Covariance — captures recent volatility clustering and dynamic correlations
     ewma_cov = returns.ewm(halflife=ewma_halflife).cov().iloc[-n:].values
 
-    # 2. Ledoit-Wolf Shrinkage applied to raw returns for optimal shrinkage intensity
-    lw = LedoitWolf().fit(returns.values)
-    shrunk_cov = lw.covariance_
-
-    # Rescale LW covariance to use EWMA volatilities (combines LW stability with EWMA recency)
-    lw_stds = np.sqrt(np.diag(shrunk_cov))
-    ewma_stds = np.sqrt(np.maximum(np.diag(ewma_cov), 1e-10))
-    if np.all(lw_stds > 0):
-        scale = ewma_stds / lw_stds
-        shrunk_cov = shrunk_cov * np.outer(scale, scale)
-    
-    # 3. RMT De-noising
-    corr, std = cov_to_corr(shrunk_cov)
+    # 2. RMT De-noising
+    corr, std = cov_to_corr(ewma_cov)
     denoised_corr = marchenko_pastur_denoise(corr, t, n)
     
-    # 4. Final Covariance & PSD Check
+    # 3. Final Covariance & PSD Check
     denoised_cov = corr_to_cov(denoised_corr, std)
     return nearest_psd(denoised_cov)
