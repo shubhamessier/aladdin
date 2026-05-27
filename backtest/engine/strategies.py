@@ -266,34 +266,33 @@ class BlackLittermanStrategy(AllocationStrategy):
             mkt_weights = np.array([MARKET_CAP_PRIORS.get(a, 0.01) for a in asset_names])
             mkt_weights = mkt_weights / mkt_weights.sum()
             
-            # Generate predictive views using momentum
+            # Generate predictive views using SMA Crossover (Trend Following)
             views = []
-            if historical_returns is not None and len(historical_returns) > 30:
-                # 30-day cross-sectional momentum
-                mom_30d = historical_returns.tail(30 * 24).sum() # Assuming roughly hourly
+            if historical_returns is not None and len(historical_returns) > 30 * 24: # Need at least 30 days of hourly data
                 stables = ["USDC", "USDT", "DAI"]
                 volatiles = [a for a in asset_names if a not in stables]
                 
-                if len(volatiles) >= 2:
-                    # Find highest and lowest momentum volatiles
-                    mom_vol = mom_30d[volatiles]
-                    best_asset = mom_vol.idxmax()
-                    worst_asset = mom_vol.idxmin()
-                    
-                    if best_asset != worst_asset and mom_vol[best_asset] > mom_vol[worst_asset]:
-                        best_idx = asset_names.index(best_asset)
-                        worst_idx = asset_names.index(worst_asset)
+                # Calculate simple moving averages on cumulative returns (proxy for price)
+                # 7-day vs 30-day SMA
+                cum_ret = (1 + historical_returns).cumprod()
+                sma_short = cum_ret.tail(7 * 24).mean()
+                sma_long = cum_ret.tail(30 * 24).mean()
+                
+                for vol_asset in volatiles:
+                    if vol_asset in sma_short and vol_asset in sma_long:
+                        signal = sma_short[vol_asset] / sma_long[vol_asset] - 1.0
+                        idx = asset_names.index(vol_asset)
                         
-                        # We expect the best to outperform the worst by an annualized spread 
-                        # Spread magnitude: 20% annualized outperformance
-                        views.append(
-                            View(
-                                asset_indices=[best_idx, worst_idx],
-                                asset_weights=[1.0, -1.0],
-                                expected_return=0.20 / 365.0, # daily return scale expected by optimizer
-                                confidence=0.75
+                        if abs(signal) > 0.02: # Only fire if trend is clear (>2% divergence)
+                            is_bullish = signal > 0
+                            views.append(
+                                View(
+                                    asset_indices=[idx],
+                                    asset_weights=[1.0],
+                                    expected_return=0.30 / 365.0 if is_bullish else -0.20 / 365.0,
+                                    confidence=min(0.80, abs(signal) * 10) # scale confidence by signal strength
+                                )
                             )
-                        )
 
             res = optimize_black_litterman(
                 covariance=covariance_matrix,
