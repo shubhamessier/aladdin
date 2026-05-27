@@ -108,12 +108,24 @@ class TreasurySimulator:
         self.var_compute_modulo = self.bars_per_day
 
         self.pre_warmup_data = pre_warmup_data
+        
+        # Performance Optimization: Precompute returns history
+        if pre_warmup_data is not None and len(pre_warmup_data) > 0:
+            full_data = pd.concat([pre_warmup_data, self.market_data])
+            self._pre_warmup_len = len(pre_warmup_data)
+        else:
+            full_data = self.market_data
+            self._pre_warmup_len = 0
+            
+        self._full_returns = full_data.pct_change().fillna(0)
+        self._full_crypto_idx = self._full_returns.mean(axis=1)
+
         if pre_warmup_data is not None and len(pre_warmup_data) >= self.warmup_days:
-            idx = pre_warmup_data.pct_change().fillna(0).mean(axis=1)
+            idx = self._full_crypto_idx.iloc[:self._pre_warmup_len]
             self.regime_detector.fit(idx)
             start_day = 0
         else:
-            warmup_idx = self.market_data.iloc[:self.warmup_days].pct_change().fillna(0).mean(axis=1)
+            warmup_idx = self._full_crypto_idx.iloc[self._pre_warmup_len : self._pre_warmup_len + self.warmup_days]
             if len(warmup_idx) >= 60:
                 self.regime_detector.fit(warmup_idx)
             start_day = self.warmup_days
@@ -171,26 +183,19 @@ class TreasurySimulator:
                 for asset in self.assets:
                     self.portfolio.weights[asset] = self.portfolio.positions[asset] / self.portfolio.portfolio_value
 
-        # 2. Risk & Regime — returns_history includes pre_warmup so it's non-empty from day 0.
+        # 2. Risk & Regime
         lookback_bars = 252 * max(1, self.bars_per_day)
-        if self.current_day == 0 and self.pre_warmup_data is not None and len(self.pre_warmup_data) > 0:
-            returns_history = self.pre_warmup_data.tail(lookback_bars).pct_change().fillna(0)
-        else:
-            slice_end = self.current_day
-            in_sim = self.market_data.iloc[max(0, slice_end-lookback_bars):slice_end]
-            if len(in_sim) < lookback_bars and self.pre_warmup_data is not None:
-                # Prepend pre_warmup tail so strategies have enough context
-                pad = self.pre_warmup_data.tail(lookback_bars - len(in_sim))
-                returns_history = pd.concat([pad, in_sim]).pct_change().fillna(0)
-            else:
-                returns_history = in_sim.pct_change().fillna(0)
+        slice_end = self._pre_warmup_len + self.current_day
+        slice_start = max(0, slice_end - lookback_bars)
+        
+        returns_history = self._full_returns.iloc[slice_start:slice_end]
+        crypto_idx_window = self._full_crypto_idx.iloc[slice_start:slice_end]
 
         if len(returns_history) > 10:
-            crypto_idx = returns_history.mean(axis=1)
-            rolling_vol = float(crypto_idx.tail(30 * self.bars_per_day).std())
+            rolling_vol = float(crypto_idx_window.tail(30 * self.bars_per_day).std())
             update_regime = (self.current_day % self.regime_cache_steps == 0)
             if update_regime or not hasattr(self, '_cached_regime_pred'):
-                pred_window = crypto_idx.tail(30 * self.bars_per_day)
+                pred_window = crypto_idx_window.tail(30 * self.bars_per_day)
                 regime_pred = self.regime_detector.predict(pred_window)
                 self._cached_regime_pred = regime_pred
             else:
@@ -228,7 +233,8 @@ class TreasurySimulator:
             if days_in >= 49:
                 self.recovery.exit()
 
-            if self.recovery.check_further_decline(self.portfolio.portfolio_value):                self.recovery.reset_recovery()
+            if self.recovery.check_further_decline(self.portfolio.portfolio_value):
+                self.recovery.reset_recovery()
                 self.cb.current_level = 2
                 current_cb_level = 2
 
@@ -341,6 +347,7 @@ class TreasurySimulator:
                         asset_names=self.assets,
                         max_volatile_override=max_vol_override,
                         current_regime=regime,
+                        historical_returns=returns_history
                     )
                 else:
                     target_weights = {a: 1.0/len(self.assets) for a in self.assets}

@@ -28,4 +28,8 @@ This document logs the resolutions for the outstanding catastrophic (A), major (
 * **C4 (Daily Volume & Gas Split-Brain):** Refactored `SecurityHooks.sol` to fetch constants dynamically via `vault.maxDailyVolumeUSD()`, `vault.maxTradeUSD()`, and `vault.maxGasPriceWei()`. The guardian's `writer.ts` now also fetches the max gas price directly from the Vault rather than hardcoding 100 Gwei.
 * **C7 (Emergency Pause):** Added explicit `pause` and `unpause` admin endpoints onto `TreasuryVault.sol` allowing `EMERGENCY_ROLE` to freeze the vault.
 
+## Phase 3 Upgrades: Alpha Injection & Simulator Performance
+* **Predictive Alpha Views:** Upgraded `BlackLittermanStrategy` to generate predictive cross-sectional momentum views rather than just defaulting to market equilibrium. By passing `historical_returns` to `generate_target_weights`, the optimizer now successfully shifts capital toward momentum leaders while shorting laggards.
+* **Simulation Speed:** The `simulator.py` step loop previously sliced pandas DataFrames on every iteration (35,000+ operations), creating massive memory allocation overhead. The history arrays are now fully pre-calculated in a numpy/pandas vector upon `run()`, drastically reducing the `step()` latency.
+
 The combined system is now significantly more robust, aligned across Python and Solidity simulation tiers, and capable of operating as a real integration loop with the guardian service.

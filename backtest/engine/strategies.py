@@ -3,6 +3,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 import numpy as np
+import pandas as pd
 import logging
 
 from backtest.engine.constants import MARKET_CAP_PRIORS, DEFAULT_RISK_AVERSION
@@ -95,7 +96,8 @@ class AllocationStrategy:
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         raise NotImplementedError
 
@@ -107,7 +109,8 @@ class RiskParityStrategy(AllocationStrategy):
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         try:
             from risk_engine.portfolio_optimizer import optimize_risk_parity
@@ -149,7 +152,8 @@ class EqualWeightStrategy(AllocationStrategy):
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         n = len(asset_names)
         if n == 0:
@@ -166,7 +170,8 @@ class BuyAndHoldStrategy(AllocationStrategy):
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         return self._apply_volatile_override(current_weights, max_volatile_override)
 
@@ -178,7 +183,8 @@ class StaticConservativeStrategy(AllocationStrategy):
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         stable_assets = ["USDC", "USDT", "DAI"]
         stables_present = [a for a in asset_names if a in stable_assets]
@@ -217,7 +223,8 @@ class MinVarianceStrategy(AllocationStrategy):
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         try:
             from risk_engine.portfolio_optimizer import optimize_mean_variance
@@ -248,7 +255,8 @@ class BlackLittermanStrategy(AllocationStrategy):
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         try:
             from risk_engine.portfolio_optimizer import optimize_black_litterman
@@ -258,12 +266,39 @@ class BlackLittermanStrategy(AllocationStrategy):
             mkt_weights = np.array([MARKET_CAP_PRIORS.get(a, 0.01) for a in asset_names])
             mkt_weights = mkt_weights / mkt_weights.sum()
             
-            # For now, no specific views (P/Q), just equilibrium
-            # This can be expanded to inject analyst views
+            # Generate predictive views using momentum
+            views = []
+            if historical_returns is not None and len(historical_returns) > 30:
+                # 30-day cross-sectional momentum
+                mom_30d = historical_returns.tail(30 * 24).sum() # Assuming roughly hourly
+                stables = ["USDC", "USDT", "DAI"]
+                volatiles = [a for a in asset_names if a not in stables]
+                
+                if len(volatiles) >= 2:
+                    # Find highest and lowest momentum volatiles
+                    mom_vol = mom_30d[volatiles]
+                    best_asset = mom_vol.idxmax()
+                    worst_asset = mom_vol.idxmin()
+                    
+                    if best_asset != worst_asset and mom_vol[best_asset] > mom_vol[worst_asset]:
+                        best_idx = asset_names.index(best_asset)
+                        worst_idx = asset_names.index(worst_asset)
+                        
+                        # We expect the best to outperform the worst by an annualized spread 
+                        # Spread magnitude: 20% annualized outperformance
+                        views.append(
+                            View(
+                                asset_indices=[best_idx, worst_idx],
+                                asset_weights=[1.0, -1.0],
+                                expected_return=0.20 / 365.0, # daily return scale expected by optimizer
+                                confidence=0.75
+                            )
+                        )
+
             res = optimize_black_litterman(
                 covariance=covariance_matrix,
                 market_caps=mkt_weights,
-                views=[],
+                views=views,
                 risk_aversion=getattr(self.config, 'risk_aversion', DEFAULT_RISK_AVERSION),
                 tau=getattr(self.config, 'tau', 0.05),
                 bounds=[(0.0, 1.0) for _ in asset_names]
@@ -287,7 +322,8 @@ class RegimeAdaptiveStrategy(AllocationStrategy):
         covariance_matrix: np.ndarray,
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
-        current_regime: str = "uncertain"
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
         if current_regime == "bull":
             volatile_target = 0.60
