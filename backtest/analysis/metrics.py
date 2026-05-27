@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 risk_engine_path = Path(__file__).resolve().parent.parent.parent / "python-risk"
 if str(risk_engine_path) not in sys.path:
@@ -16,41 +16,62 @@ def calculate_drawdowns(portfolio_values: pd.Series) -> pd.Series:
     drawdowns = (portfolio_values - running_max) / running_max
     return drawdowns
 
+def _infer_annualization(index: pd.DatetimeIndex) -> int:
+    """
+    Infer the annualization factor (steps-per-year) from a DatetimeIndex.
+    Returns 365 * bars_per_day for intraday cadence, 365 for daily, 52 for weekly.
+    """
+    if len(index) < 2:
+        return 365
+    diffs = index.to_series().diff().dropna()
+    median = diffs.median()
+    if median <= pd.Timedelta(hours=1):
+        bars_per_day = max(1, int(round(pd.Timedelta(days=1) / median)))
+        return 365 * bars_per_day
+    if median <= pd.Timedelta(days=1):
+        return 365
+    if median <= pd.Timedelta(days=7):
+        return 52
+    return 12
+
+
 def calculate_performance_metrics(
-    portfolio_history: pd.DataFrame, 
-    risk_free_rate: float = 0.02
+    portfolio_history: pd.DataFrame,
+    risk_free_rate: float = 0.02,
+    annualization_factor: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Calculates Sharpe, Sortino, Max Drawdown, and VaR from a backtest history.
     portfolio_history must contain a 'portfolio_value' column indexed by datetime.
+    Annualization factor is inferred from the index cadence unless explicitly provided.
     """
     if 'portfolio_value' not in portfolio_history.columns or len(portfolio_history) < 2:
         return {}
 
     values = portfolio_history['portfolio_value']
     returns = values.pct_change().dropna()
-    
-    if len(returns) == 0:
+
+    if len(returns) == 0 or values.iloc[0] <= 0 or not np.isfinite(values.iloc[-1]):
         return {}
-        
-    # Annualization factor assuming daily data
-    annualization_factor = 252
-    
-    # Expected return and volatility
-    mean_return = returns.mean()
+
+    if annualization_factor is None:
+        annualization_factor = _infer_annualization(portfolio_history.index)
+
     volatility = returns.std()
-    
-    annualized_return = (1 + mean_return) ** annualization_factor - 1
-    annualized_vol = volatility * np.sqrt(annualization_factor)
-    
-    # Sharpe Ratio
+
+    # CAGR via total return → avoids the (1+mean)^N blow-up at intraday cadence
+    total_return = float(values.iloc[-1] / values.iloc[0])
+    n_steps = len(values)
+    annualized_return = total_return ** (annualization_factor / n_steps) - 1.0 if total_return > 0 else -1.0
+    annualized_vol = float(volatility * np.sqrt(annualization_factor))
+
     excess_return = annualized_return - risk_free_rate
     sharpe_ratio = excess_return / annualized_vol if annualized_vol > 0 else 0.0
-    
-    # Sortino Ratio (BUG-12)
+
+    # Sortino
     target = risk_free_rate / annualization_factor
     downside_diff = np.minimum(returns - target, 0)
-    downside_deviation = np.sqrt(np.mean(downside_diff**2)) * np.sqrt(annualization_factor)
+    downside_deviation = float(np.sqrt(np.mean(downside_diff**2)) * np.sqrt(annualization_factor))
     sortino_ratio = excess_return / downside_deviation if downside_deviation > 0 else 0.0
     
     # Maximum Drawdown

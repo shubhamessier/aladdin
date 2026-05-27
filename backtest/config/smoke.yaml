@@ -14,10 +14,10 @@ simulation:
   - SOL
   data_source: binance
   interval: 1h
-  end_date: '2026-05-24'
+  end_date: '2025-05-01'
   initial_cash: 1000000.0
   risk_free_rate: 0.05
-  start_date: '2022-05-24'
+  start_date: '2025-02-01'
 strategies:
 - name: Equal Weight
 - name: Risk Parity

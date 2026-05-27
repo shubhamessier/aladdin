@@ -56,15 +56,24 @@ def print_simulation_summary(history: List[Dict[str, Any]]):
     end_val = history[-1]["portfolio_value"]
     
     total_trade_volume = sum(h.get("trade_volume_usd", 0.0) for h in history)
-    cb_triggers = sum(1 for h in history if h.get("cb_level", 0) > 0)
-    
+    cb_bars = sum(1 for h in history if h.get("cb_level", 0) > 0)
+
+    # Infer bars-per-day from timestamp spacing
+    if len(history) > 1:
+        delta = (history[1]["timestamp"] - history[0]["timestamp"]).total_seconds()
+        bars_per_day = max(1, int(round(86400 / delta))) if delta > 0 else 1
+    else:
+        bars_per_day = 1
+    cb_days = cb_bars / bars_per_day
+
     summary = [
         ["Start Date", start_date],
         ["End Date", end_date],
         ["Initial Value", f"${start_val:,.2f}"],
         ["Final Value", f"${end_val:,.2f}"],
         ["Total Trade Volume", f"${total_trade_volume:,.2f}"],
-        ["Days in Circuit Breaker", cb_triggers]
+        ["Bars in Circuit Breaker", cb_bars],
+        ["Calendar Days in CB", f"{cb_days:.1f}"],
     ]
     
     print("\nSimulation Summary:")

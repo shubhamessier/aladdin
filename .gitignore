@@ -37,6 +37,11 @@ lib/
 # Logs
 *.log
 
+# Backtest generated artifacts (regenerable from APIs)
+backtest/output/
+backtest/output_*/
+backtest/cache/
+
 # Guardian Service Build Artifacts
 guardian-service/src/**/*.js
 guardian-service/src/**/*.d.ts

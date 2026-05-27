@@ -1,7 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import pandas as pd
 import numpy as np
@@ -77,35 +77,64 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     end_date = datetime.strptime(sim_config.get('end_date', '2024-01-01'), '%Y-%m-%d')
     assets = sim_config.get('assets', ['BTC', 'ETH', 'USDC'])
     initial_cash = sim_config.get('initial_cash', 1000000.0)
-    source = sim_config.get('data_source', 'hyperliquid')
+    source = sim_config.get('data_source', 'binance')
     risk_free_rate = sim_config.get('risk_free_rate', 0.05)
 
-    # Fetch pre-warmup data (90 days before start)
+    # Fetch pre-warmup data (90 days before start). datetime.timestamp() on a naive datetime
+    # interprets it as local time; force UTC by using calendar.timegm.
+    import calendar
+    def _to_unix_utc(dt: datetime) -> int:
+        return calendar.timegm(dt.timetuple())
+
     warmup_start = start_date - timedelta(days=90)
     
-    print(f"Fetching market data for {assets} (including 90d warmup) from {warmup_start.date()} to {end_date.date()}...")
+    interval = sim_config.get('interval', '1d')
+    print(f"Fetching market data for {assets} (including 90d warmup) from {warmup_start.date()} to {end_date.date()} at interval={interval}...")
     fetcher = DataFetcher(cache_dir="backtest/cache")
-    dfs = []
+
+    fetched: dict[str, pd.DataFrame] = {}
     for asset in assets:
-        # F2A: Use hourly HL-native data if requested in config, else daily
-        interval = sim_config.get('interval', '1d')
-        df = fetcher.fetch_ohlcv(asset, int(warmup_start.timestamp()), int(end_date.timestamp()), source=source, interval=interval)
+        df = fetcher.fetch_ohlcv(asset, _to_unix_utc(warmup_start), _to_unix_utc(end_date), source=source, interval=interval)
         if not df.empty:
-            df = df[['close']].rename(columns={'close': asset})
-            dfs.append(df)
+            fetched[asset] = df[['close']].rename(columns={'close': asset})
+        else:
+            logger.warning(f"No data for {asset}; dropping from universe")
 
-    if not dfs:
-        print("Error: No market data fetched.")
-        return
+    if not fetched:
+        raise RuntimeError("No market data fetched for any asset. Aborting.")
 
-    price_history = pd.concat(dfs, axis=1).ffill().bfill()
-    
-    # BUG-5-10: Validate fetched assets
-    fetched_assets = price_history.columns.tolist()
-    missing_assets = [a for a in assets if a not in fetched_assets]
+    missing_assets = [a for a in assets if a not in fetched]
     if missing_assets:
-        print(f"Warning: Failed to fetch data for {missing_assets}. Removing from asset list.")
-        assets = [a for a in assets if a in fetched_assets]
+        print(f"Warning: dropped {missing_assets} due to empty fetch")
+        assets = [a for a in assets if a in fetched]
+
+    # All per-asset series are already reindexed to the same grid; align by index intersection.
+    common_index = None
+    for asset, df in fetched.items():
+        idx = df.index
+        common_index = idx if common_index is None else common_index.intersection(idx)
+    if common_index is None or len(common_index) == 0:
+        raise RuntimeError("No overlapping timestamps across assets. Aborting.")
+
+    price_history = pd.concat([fetched[a].reindex(common_index) for a in assets], axis=1)
+
+    # Hard fail-loud guards: no NaN, no non-positive prices, monotonic increasing index.
+    if price_history.isna().any().any():
+        na_per_col = price_history.isna().sum()
+        raise RuntimeError(f"price_history has NaN after reindex. NaN per column:\n{na_per_col}")
+    if (price_history <= 0).any().any():
+        bad = (price_history <= 0).sum()
+        raise RuntimeError(f"price_history has non-positive values:\n{bad}")
+    if not price_history.index.is_monotonic_increasing:
+        raise RuntimeError("price_history index is not monotonic increasing")
+    if price_history.index.has_duplicates:
+        raise RuntimeError("price_history index has duplicates")
+
+    # Confirm cadence
+    diffs = price_history.index.to_series().diff().dropna().unique()
+    if len(diffs) != 1:
+        raise RuntimeError(f"price_history has mixed cadence. Unique diffs: {diffs}")
+    print(f"price_history: shape={price_history.shape}, cadence={diffs[0]}, range={price_history.index[0]}..{price_history.index[-1]}")
 
     # Real Data Audit #3 & #4: Fetch real funding, lending, and depth
     print("Fetching real funding and lending series...")
@@ -115,7 +144,7 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     funding_series = {}
     for asset in volatile_assets:
         try:
-            df_funding = fetch_funding_rates(asset, int(warmup_start.timestamp()), int(end_date.timestamp()))
+            df_funding = fetch_funding_rates(asset, _to_unix_utc(warmup_start), _to_unix_utc(end_date))
             if not df_funding.empty:
                 funding_series[asset] = df_funding["funding_rate"]
         except Exception as e:
@@ -125,7 +154,7 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     for asset in stable_assets_ref:
         if asset in assets:
             try:
-                df_lending = fetch_lending_rates(asset, int(warmup_start.timestamp()), int(end_date.timestamp()))
+                df_lending = fetch_lending_rates(asset, _to_unix_utc(warmup_start), _to_unix_utc(end_date))
                 if not df_lending.empty:
                     lending_series[asset] = df_lending["lending_rate"]
             except Exception as e:
@@ -150,8 +179,14 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
     pre_warmup_prices = price_history[price_history.index < start_date]
     sim_prices = price_history[price_history.index >= start_date]
 
-    # BUG-13: Benchmark is normalized price index
-    benchmark = (sim_prices[assets] / sim_prices[assets].iloc[0]).mean(axis=1) * initial_cash
+    # Benchmark = equal-weight VOLATILE-only price index (stables would dilute the line).
+    bench_assets = [a for a in assets if a not in ("USDC", "USDT", "DAI")]
+    if not bench_assets:
+        bench_assets = assets  # degenerate but well-defined
+    first_row = sim_prices[bench_assets].iloc[0]
+    if (first_row <= 0).any():
+        raise RuntimeError(f"benchmark first row has non-positive price: {first_row.to_dict()}")
+    benchmark = (sim_prices[bench_assets] / first_row).mean(axis=1) * initial_cash
     
     strategies = config.get('strategies', [{'name': 'Equal Weight'}])
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -186,25 +221,41 @@ def run_simulation(config_file: str, monte_carlo: bool, output_dir: str) -> None
         history_df.set_index('timestamp', inplace=True)
         history_df.index = pd.to_datetime(history_df.index)
         
-        metrics = calculate_performance_metrics(history_df, risk_free_rate=risk_free_rate)
-        attribution = decompose_returns(history_df, benchmark)
-        
+        metrics = calculate_performance_metrics(history_df, risk_free_rate=risk_free_rate,
+                                                annualization_factor=sim.annualization_factor)
+        attribution = decompose_returns(history_df, benchmark, risk_free_rate=risk_free_rate,
+                                        annualization_factor=sim.annualization_factor)
+
+        if not metrics:
+            raise RuntimeError(f"[{strat_name}] calculate_performance_metrics returned empty. "
+                               f"history len={len(history_df)}, first_pv={history_df['portfolio_value'].iloc[0]}, "
+                               f"nan_count={history_df['portfolio_value'].isna().sum()}")
+
         print_simulation_summary(sim.history)
         print_performance_report(metrics, attribution)
-        
+
         safe_name = strat_name.replace(" ", "_").lower()
-        
-        # BUG-09: unique chart filenames
+
         generate_nav_comparison(history_df, benchmark, output_dir=output_dir, filename=f"nav_comparison_{safe_name}.png")
         generate_drawdown_comparison(history_df, benchmark, output_dir=output_dir, filename=f"drawdown_comparison_{safe_name}.png")
-        
+
         csv_path = f"{output_dir}/{safe_name}_history.csv"
         history_df.to_csv(csv_path)
-        
+
+        # Sanity gate: at least 95% non-null portfolio_value
+        nonnull_frac = history_df['portfolio_value'].notna().mean()
+        if nonnull_frac < 0.95:
+            raise RuntimeError(
+                f"[{strat_name}] history has only {nonnull_frac*100:.1f}% non-null portfolio_value rows. "
+                f"Refusing to publish broken output."
+            )
+
         monthly_returns_path = f"{output_dir}/monthly_returns_{safe_name}.csv"
         monthly_returns = history_df['portfolio_value'].resample('ME').last().pct_change().dropna()
+        if len(monthly_returns) == 0:
+            logger.warning(f"[{strat_name}] monthly_returns empty (run too short)")
         monthly_returns.to_csv(monthly_returns_path, header=['monthly_return'])
-        
+
         summary_data[strat_name] = {'metrics': metrics, 'attribution': attribution}
 
         if monte_carlo:
