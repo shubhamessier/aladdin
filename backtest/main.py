@@ -40,11 +40,13 @@ from backtest.analysis.metrics import calculate_performance_metrics
 from backtest.analysis.attribution import decompose_returns
 from backtest.optimizer.main import run_full_optimization, export_optimal_config
 from backtest.engine.strategies import (
-    AllocationStrategy, EqualWeightStrategy, RiskParityStrategy, 
-    RegimeAdaptiveStrategy, StaticConservativeStrategy, MinVarianceStrategy, 
-    BlackLittermanStrategy, StrategyConfig, RiskParityConfig, 
+    AllocationStrategy, EqualWeightStrategy, RiskParityStrategy,
+    RegimeAdaptiveStrategy, StaticConservativeStrategy, MinVarianceStrategy,
+    BlackLittermanStrategy, StrategyConfig, RiskParityConfig,
     RegimeAdaptiveConfig, StaticConservativeConfig
 )
+from backtest.engine.market_neutral.basis_arbitrage import BasisArbitrageStrategy, BasisArbitrageConfig
+from backtest.engine.market_neutral.statistical_arbitrage import StatArbStrategy, StatArbConfig
 
 from backtest.data.funding import fetch_funding_rates
 from backtest.data.lending import fetch_lending_rates
@@ -62,9 +64,12 @@ def get_strategy(strat_dict: dict[str, Any]) -> AllocationStrategy:
         return MinVarianceStrategy(StrategyConfig(**strat_dict))
     elif name == 'Black-Litterman':
         return BlackLittermanStrategy(StrategyConfig(**strat_dict))
+    elif name == 'Basis Arbitrage':
+        return BasisArbitrageStrategy(BasisArbitrageConfig(**strat_dict))
+    elif name == 'Statistical Arbitrage':
+        return StatArbStrategy(StatArbConfig(**strat_dict))
     else:
         return EqualWeightStrategy(StrategyConfig(**strat_dict))
-
 def load_config(config_path: str) -> dict[str, Any]:
     with open(config_path, 'r') as f:
         config: dict[str, Any] = yaml.safe_load(f)

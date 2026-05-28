@@ -1,0 +1,33 @@
+circuit_breaker:
+  l1_drop_threshold: 0.1
+  l2_drop_threshold: 0.2
+  l3_drop_threshold: 0.35
+  max_drawdown_threshold: 0.2
+  window_seconds: 3600
+  hwm_decay_halflife_days: 90
+simulation:
+  assets:
+  - BTC
+  - ETH
+  - USDC
+  - USDT
+  - DAI
+  data_source: binance
+  interval: 1h
+  end_date: '2026-05-24'
+  initial_cash: 1000000.0
+  risk_free_rate: 0.05
+  start_date: '2022-05-24'
+cost_model:
+  maker_fraction_normal: 1.0
+  maker_fee_bps: -0.2
+  toxicity_alpha: 0.0
+strategies:
+- name: Basis Arbitrage
+  entry_funding_apy: 0.10
+  exit_funding_apy: 0.05
+  max_leverage: 3.0
+- name: Statistical Arbitrage
+  z_score_entry: 2.0
+  z_score_exit: 0.0
+  lookback_days: 14

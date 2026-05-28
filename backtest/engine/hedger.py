@@ -100,9 +100,23 @@ class HedgingEngine:
             portfolio.cash += funding_payment_step
             funding_pnl_step += funding_payment_step
 
-            # 3. Liquidation: equity = margin + unrealized_pnl
-            equity = pos.margin_usd + pos.unrealized_pnl
-            if equity < self.config.maintenance_margin_fraction * pos.margin_usd:
+            # 3. Liquidation: equity = margin + unrealized_pnl + (cross-margin spot value)
+            # In a unified trading account, if you are short a perp and hold the underlying spot, 
+            # the spot acts as collateral, preventing cash-drain liquidations.
+            spot_value = portfolio.positions.get(token, 0.0)
+            cross_margin_equity = pos.margin_usd + pos.unrealized_pnl
+            
+            # If we are short, and hold spot, we can use the spot value to prevent liquidation
+            if pos.direction == "short":
+                # The amount of underlying token we are shorting
+                short_token_amount = pos.notional_usd / pos.entry_price
+                # The current USD value of that shorted token amount
+                current_short_value = short_token_amount * mark
+                # We can collateralize up to the current value of the short
+                collateral_value = min(spot_value, current_short_value)
+                cross_margin_equity += collateral_value
+                
+            if cross_margin_equity < self.config.maintenance_margin_fraction * pos.margin_usd:
                 # Force close at adverse fill
                 adverse_slip = self.config.liquidation_slippage_bps / 10000.0
                 liq_loss = pos.notional_usd * adverse_slip
@@ -111,7 +125,7 @@ class HedgingEngine:
                 portfolio.cash += pos.margin_usd + realized
                 logger.info(
                     f"LIQUIDATED {pos.market} at {date}: notional={pos.notional_usd:.0f}, "
-                    f"margin={pos.margin_usd:.0f}, realized={realized:.2f}, equity_before={equity:.2f}"
+                    f"margin={pos.margin_usd:.0f}, realized={realized:.2f}, equity_before={cross_margin_equity:.2f}"
                 )
                 continue  # drop from survivors
 
@@ -128,12 +142,15 @@ class HedgingEngine:
         date: pd.Timestamp,
         cost_model,
         rolling_vol: float,
+        explicit_target_ratios: Optional[Dict[str, float]] = None
     ) -> None:
         """
         Compute target short notional per asset and open/close positions to reach it.
         Margin is deducted from / returned to cash.
+        If explicit_target_ratios is provided, uses those multipliers (e.g. 1.0 = 100% of spot is shorted)
+        Otherwise falls back to regime-based ratio.
         """
-        target_ratio = self.config.regime_hedge_ratios.get(regime, 0.5)
+        default_target_ratio = self.config.regime_hedge_ratios.get(regime, 0.5)
         leverage = max(1.0, self.config.target_leverage)
 
         # Net spot exposure per token (in USD)
@@ -156,6 +173,12 @@ class HedgingEngine:
         for token, spot in spot_exposure.items():
             if spot <= 0:
                 continue
+            
+            if explicit_target_ratios and token in explicit_target_ratios:
+                target_ratio = explicit_target_ratios[token]
+            else:
+                target_ratio = default_target_ratio
+                
             desired_short = spot * target_ratio  # positive scalar: how much SHORT notional we want
             desired_signed = -desired_short      # signed delta in same convention as current_short
             change = desired_signed - current_short.get(token, 0.0)

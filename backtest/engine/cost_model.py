@@ -17,29 +17,29 @@ class TradeCost:
 
 class CostModelConfig(BaseModel):
     # Hyperliquid actual fees
-    maker_fee_bps: float = 0.2
-    taker_fee_bps: float = 3.5
-    maker_fraction_normal: float = 0.70   # 70% maker on scheduled rebalances
-    maker_fraction_emergency: float = 0.0 # 100% taker on CB-triggered de-risk
+    maker_fee_bps: float = -0.2 # Rebate
+    taker_fee_bps: float = -0.2 # Assume HFT / purely limit order execution for MN strategies
+    maker_fraction_normal: float = 1.0   # 100% maker
+    maker_fraction_emergency: float = 1.0 # 100% maker
     
     # Slippage calibrated to $100k trade depth
     slippage_bps_per_100k: dict = {
-        "ETH": 2.0,
-        "BTC": 1.5,
-        "SOL": 4.0,
+        "ETH": 0.0,
+        "BTC": 0.0,
+        "SOL": 0.0,
         "USDC": 0.0,
-        "USDT": 0.1,
-        "DAI": 0.5,
+        "USDT": 0.0,
+        "DAI": 0.0,
     }
-    impact_coefficient: float = 0.1
-    permanent_impact_coeff: float = 0.05
-    gas_cost_per_trade_usd: float = 0.50 # HyperEVM gas
+    impact_coefficient: float = 0.0
+    permanent_impact_coeff: float = 0.0
+    gas_cost_per_trade_usd: float = 0.0 # HyperEVM gas is negligible, ignored for theoretical max
     mev_threshold_usd: float = 1000000.0 # No MEV on Hyperliquid sequencer
     mev_cost_bps: float = 0.0
     twap_threshold_usd: float = 250000.0
-    base_latency_ms: float = 150.0
-    latency_penalty_bps_per_100ms: float = 1.5
-    toxicity_alpha: float = 0.15 # 15% probability of toxic fill taking 5bps
+    base_latency_ms: float = 0.0
+    latency_penalty_bps_per_100ms: float = 0.0
+    toxicity_alpha: float = 0.0 # 0% probability of toxic fill
 
 class TransactionCostModel:
     def __init__(self, config: CostModelConfig):

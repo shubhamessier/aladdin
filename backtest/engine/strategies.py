@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import numpy as np
 import pandas as pd
 import logging
@@ -97,9 +97,26 @@ class AllocationStrategy:
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         raise NotImplementedError
+        
+    def generate_target_hedges(
+        self,
+        current_weights: Dict[str, float],
+        expected_returns: Dict[str, float],
+        covariance_matrix: np.ndarray,
+        asset_names: List[str],
+        max_volatile_override: Optional[float] = None,
+        current_regime: str = "uncertain",
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
+    ) -> Optional[Dict[str, float]]:
+        """Return explicit short ratios per asset (1.0 = 100% of spot is shorted). If None, hedger uses regime defaults."""
+        return None
 
 class RiskParityStrategy(AllocationStrategy):
     def generate_target_weights(
@@ -110,7 +127,9 @@ class RiskParityStrategy(AllocationStrategy):
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         try:
             from risk_engine.portfolio_optimizer import optimize_risk_parity
@@ -153,7 +172,9 @@ class EqualWeightStrategy(AllocationStrategy):
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         n = len(asset_names)
         if n == 0:
@@ -171,7 +192,9 @@ class BuyAndHoldStrategy(AllocationStrategy):
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         return self._apply_volatile_override(current_weights, max_volatile_override)
 
@@ -184,7 +207,9 @@ class StaticConservativeStrategy(AllocationStrategy):
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         stable_assets = ["USDC", "USDT", "DAI"]
         stables_present = [a for a in asset_names if a in stable_assets]
@@ -224,7 +249,9 @@ class MinVarianceStrategy(AllocationStrategy):
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         try:
             from risk_engine.portfolio_optimizer import optimize_mean_variance
@@ -256,7 +283,9 @@ class BlackLittermanStrategy(AllocationStrategy):
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         try:
             from risk_engine.portfolio_optimizer import optimize_black_litterman
@@ -322,7 +351,9 @@ class RegimeAdaptiveStrategy(AllocationStrategy):
         asset_names: List[str],
         max_volatile_override: Optional[float] = None,
         current_regime: str = "uncertain",
-        historical_returns: Optional[pd.DataFrame] = None
+        historical_returns: Optional[pd.DataFrame] = None,
+        date: Optional[pd.Timestamp] = None,
+        yield_engine: Optional[Any] = None
     ) -> Dict[str, float]:
         if current_regime == "bull":
             volatile_target = 0.60

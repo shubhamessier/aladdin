@@ -301,7 +301,7 @@ class TreasurySimulator:
         })
 
         if is_scheduled or entered_emergency:
-            self._execute_rebalance(prices, returns_history, current_cb_level, regime_pred.current_regime, rolling_vol)
+            target_hedges = self._execute_rebalance(prices, returns_history, current_cb_level, regime_pred.current_regime, rolling_vol, pd.Timestamp(date))
 
         # 7. After rebalance, the hedger sets target hedges; do this AFTER spot rebalance so
         # the target depends on the updated spot exposure.
@@ -313,10 +313,12 @@ class TreasurySimulator:
                 date=pd.Timestamp(date),
                 cost_model=self.cost_model,
                 rolling_vol=rolling_vol,
+                explicit_target_ratios=target_hedges
             )
 
-    def _execute_rebalance(self, prices: pd.Series, returns_history: pd.DataFrame, cb_level: int, regime: str, rolling_vol: float) -> float:
+    def _execute_rebalance(self, prices: pd.Series, returns_history: pd.DataFrame, cb_level: int, regime: str, rolling_vol: float, date: pd.Timestamp) -> Optional[Dict[str, float]]:
         # Decide target weights. Emergency: 100% to first available stable.
+        target_hedges = None
         if cb_level >= 2:
             target_weights = {a: 0.0 for a in self.assets}
             picked = False
@@ -347,7 +349,21 @@ class TreasurySimulator:
                         asset_names=self.assets,
                         max_volatile_override=max_vol_override,
                         current_regime=regime,
-                        historical_returns=returns_history
+                        historical_returns=returns_history,
+                        date=date,
+                        yield_engine=self.yield_engine
+                    )
+                    
+                    target_hedges = self.strategy.generate_target_hedges(
+                        current_weights=self.portfolio.weights,
+                        expected_returns=expected_returns_dict,
+                        covariance_matrix=cov,
+                        asset_names=self.assets,
+                        max_volatile_override=max_vol_override,
+                        current_regime=regime,
+                        historical_returns=returns_history,
+                        date=date,
+                        yield_engine=self.yield_engine
                     )
                 else:
                     target_weights = {a: 1.0/len(self.assets) for a in self.assets}
@@ -456,7 +472,7 @@ class TreasurySimulator:
             self.history[-1]["portfolio_value"] = self.portfolio.portfolio_value
             self.history[-1]["cash"] = self.portfolio.cash
 
-        return total_cost
+        return target_hedges
 
     def summary(self) -> dict[str, Any]:
         if not self.history: return {}

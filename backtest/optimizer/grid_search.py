@@ -8,6 +8,12 @@ from typing import List, Dict, Any, Optional
 from backtest.optimizer.param_space import ParamSpec
 from backtest.optimizer.scorer import OptimizationObjectives
 from backtest.engine.simulator import TreasurySimulator
+from backtest.engine.strategies import (
+    AllocationStrategy, EqualWeightStrategy, RiskParityStrategy,
+    RegimeAdaptiveStrategy, StaticConservativeStrategy, MinVarianceStrategy,
+    BlackLittermanStrategy, StrategyConfig, RiskParityConfig,
+    RegimeAdaptiveConfig, StaticConservativeConfig
+)
 
 def _run_single_backtest(
     market_data: Any,
@@ -34,12 +40,29 @@ def _run_single_backtest(
     cb_cfg_dict = config.get('circuit_breaker', {})
     cb_config = CircuitBreakerConfig(**cb_cfg_dict)
 
+    # Initialize the correct strategy
+    strat_obj: AllocationStrategy
+    strat_dict = {"name": strategy}
+    if strategy == 'Risk Parity':
+        strat_obj = RiskParityStrategy(RiskParityConfig(**strat_dict))
+    elif strategy == 'Regime-Adaptive':
+        strat_obj = RegimeAdaptiveStrategy(RegimeAdaptiveConfig(**strat_dict))
+    elif strategy == 'Static Conservative':
+        strat_obj = StaticConservativeStrategy(StaticConservativeConfig(**strat_dict))
+    elif strategy == 'Min Variance':
+        strat_obj = MinVarianceStrategy(StrategyConfig(**strat_dict))
+    elif strategy == 'Black-Litterman':
+        strat_obj = BlackLittermanStrategy(StrategyConfig(**strat_dict))
+    else:
+        strat_obj = EqualWeightStrategy(StrategyConfig(**strat_dict))
+
     simulator = TreasurySimulator(
         initial_cash=initial_cash,
         start_date=start_date,
         end_date=end_date,
         assets=assets,
-        circuit_breaker_config=cb_config
+        circuit_breaker_config=cb_config,
+        strategy=strat_obj
     )
     simulator.load_market_data(market_data.prices)
 
